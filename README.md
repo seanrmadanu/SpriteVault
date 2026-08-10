@@ -10,8 +10,10 @@ A native SwiftUI macOS checklist for all 117 Fortnite Sprites in the supplied Fo
 - Vision OCR reads only the selected Sprite's right-side name and level
 - Matches that name to the built-in catalog for its rarity/type
 - Marks a detected Sprite as owned, saves its exact level, and marks it Mastered only when that same Sprite is Level 5
+- Preserves the recording's full text resolution, then crops and enhances only the right-side details panel
+- Supports wrapped/name-only titles, the game's Lootin' Llama naming, and the Sprite Mastered banner
 - Accepts an exact right-panel catalog match immediately; fuzzy OCR still requires matching frames
-- Samples roughly three times per second and lets you review results before applying them
+- Samples a little over twice per second and lets you review results before applying them
 - Heavy motion/UI polish: animated background, staggered card entrances, hover tilt, floating Sprite artwork, spring transitions, progress-ring animation, numeric count transitions, scanline import animation, symbol effects, toast animations, mastered sparkles, animated filter panel, and more
 - Honors macOS Reduce Motion for the animated background
 

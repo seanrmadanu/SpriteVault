@@ -23,7 +23,7 @@ struct VideoImportSheet: View {
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Auto-check from recording").font(.title2.weight(.black))
-                    Text("Reads only the selected Sprite's right-side name and level, then matches it to the catalog.")
+                    Text("Reads the selected title, level, and Mastered banner from a high-resolution right-side crop.")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -141,7 +141,7 @@ struct VideoImportSheet: View {
                     showResetConfirmation = true
                 }
 
-                Text("Select every card. Scrolling past a row only reads the one card highlighted on the right.")
+                Text("Select every card for about 1 second. Wrapped titles and the Mastered banner are supported.")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Analyze Recording") { analyze() }

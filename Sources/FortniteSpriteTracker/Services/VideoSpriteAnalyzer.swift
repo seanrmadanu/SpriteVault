@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Vision
+import CoreImage
 
 struct DetectedSprite: Identifiable, Hashable, Sendable {
     var id: String { name }
@@ -19,6 +20,8 @@ actor VideoSpriteAnalyzer {
     private let catalogByLongestName = SpriteCatalog.all.sorted {
         $0.name.count > $1.name.count
     }
+    private let ciContext = CIContext()
+    private let detailsRegion = CGRect(x: 0.52, y: 0.23, width: 0.46, height: 0.39)
 
     func analyze(
         url: URL,
@@ -29,15 +32,14 @@ actor VideoSpriteAnalyzer {
         let seconds = max(CMTimeGetSeconds(duration), 0.1)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 1280, height: 720)
+        generator.maximumSize = CGSize(width: 1920, height: 1250)
         generator.requestedTimeToleranceBefore = CMTime(seconds: 0.05, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(seconds: 0.05, preferredTimescale: 600)
         let textRequest = makeTextRequest()
 
-        // Roughly three samples per second catches a one-second selection even
-        // when its start falls between sample boundaries. The cap keeps long
-        // recordings from taking unbounded time.
-        let interval = max(0.33, seconds / 360.0)
+        // A little over two precise samples per second catches the recording's
+        // one-second selections. Vision receives only the cropped details panel.
+        let interval = max(0.45, seconds / 300.0)
         var times: [CMTime] = []
         var sampleTime = 0.0
         while sampleTime < seconds {
@@ -54,8 +56,9 @@ actor VideoSpriteAnalyzer {
         for (frameIndex, time) in times.enumerated() {
             try Task.checkCancellation()
             let frame = try await generator.image(at: time).image
-            let lines = try autoreleasepool {
-                try recognizeRightPanelText(in: frame, request: textRequest)
+            let lines: [OCRLine] = try autoreleasepool {
+                guard let panel = preparedDetailsPanel(from: frame) else { return [] }
+                return try recognizeRightPanelText(in: panel, request: textRequest)
             }
             let timestamp = CMTimeGetSeconds(time)
             var progressDescription = "Reading the right-side name and level…"
@@ -101,15 +104,53 @@ actor VideoSpriteAnalyzer {
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
         request.recognitionLanguages = ["en-US"]
-        request.minimumTextHeight = 0.016
+        request.minimumTextHeight = 0.032
 
-        // The selected rarity, level, and name occupy this band. Excluding most
-        // description text and all grid cards cuts Vision's per-frame workload.
-        request.regionOfInterest = CGRect(x: 0.57, y: 0.27, width: 0.40, height: 0.31)
-        request.customWords = catalog.flatMap { item in
-            [item.name, "\(item.name) Sprite"]
-        } + (1...5).flatMap { ["Lvl \($0)", "Level \($0)"] }
+        request.regionOfInterest = CGRect(x: 0, y: 0, width: 1, height: 1)
+        request.customWords = recognitionWords
         return request
+    }
+
+    private var recognitionWords: [String] {
+        var words = catalog.flatMap { item in
+            [item.name, "\(item.name) Sprite"]
+        }
+        for item in catalog where item.name.contains("Llama") {
+            let gameName = item.name.replacingOccurrences(
+                of: "Llama",
+                with: "Lootin' Llama"
+            )
+            words.append(gameName)
+            words.append("\(gameName) Sprite")
+        }
+        words.append("Sprite Mastered")
+        words += SpriteRarity.allCases.map(\.rawValue)
+        words += (1...5).flatMap { ["Lvl \($0)", "Level \($0)"] }
+        return words
+    }
+
+    private func preparedDetailsPanel(from image: CGImage) -> CGImage? {
+        let source = CIImage(cgImage: image)
+        let extent = source.extent
+        let cropRect = CGRect(
+            x: extent.minX + extent.width * detailsRegion.minX,
+            y: extent.minY + extent.height * detailsRegion.minY,
+            width: extent.width * detailsRegion.width,
+            height: extent.height * detailsRegion.height
+        ).intersection(extent)
+        guard !cropRect.isNull, cropRect.width > 1, cropRect.height > 1 else { return nil }
+
+        let prepared = source
+            .cropped(to: cropRect)
+            .applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: 0,
+                kCIInputContrastKey: 1.30,
+                kCIInputBrightnessKey: 0.025
+            ])
+            .applyingFilter("CISharpenLuminance", parameters: [
+                kCIInputSharpnessKey: 0.45
+            ])
+        return ciContext.createCGImage(prepared, from: cropRect)
     }
 
     private func recognizeRightPanelText(
@@ -119,13 +160,15 @@ actor VideoSpriteAnalyzer {
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         try handler.perform([request])
 
-        return (request.results ?? []).compactMap { observation in
-            guard let candidate = observation.topCandidates(1).first else { return nil }
-            return OCRLine(
-                text: candidate.string,
-                confidence: candidate.confidence,
-                box: observation.boundingBox
-            )
+        return (request.results ?? []).flatMap { observation in
+            observation.topCandidates(3).enumerated().map { rank, candidate in
+                OCRLine(
+                    text: candidate.string,
+                    confidence: candidate.confidence,
+                    box: observation.boundingBox,
+                    candidateRank: rank
+                )
+            }
         }
     }
 
@@ -133,8 +176,21 @@ actor VideoSpriteAnalyzer {
         in lines: [OCRLine]
     ) -> (item: SpriteItem, level: Int, isExactMatch: Bool)? {
         let expandedLines = linesIncludingJoinedFragments(lines)
+        let largestTextHeight = expandedLines.map(\.box.height).max() ?? 0
+        let panelShowsMastered = expandedLines.contains { line in
+            canonicalOCRText(line.text).contains("mastered")
+        }
+        let observedRarity = detectedRarity(in: expandedLines)
         let nameMatches = expandedLines.compactMap { line -> (match: CatalogMatch, line: OCRLine)? in
-            guard let match = catalogMatch(from: line.text) else { return nil }
+            let isLikelyTitle = largestTextHeight > 0
+                && line.box.height >= largestTextHeight * 0.52
+            guard let match = catalogMatch(
+                from: line.text,
+                allowNameWithoutSprite: isLikelyTitle
+            ) else { return nil }
+            guard observedRarity == nil || match.item.rarity == observedRarity else {
+                return nil
+            }
             let minimumConfidence: Float = match.isExact ? 0.20 : 0.35
             guard line.confidence >= minimumConfidence else { return nil }
             return (match, line)
@@ -149,8 +205,19 @@ actor VideoSpriteAnalyzer {
                 return (level, horizontal * 0.25 + vertical)
             }
 
+            if panelShowsMastered {
+                return (
+                    match.match.item,
+                    5,
+                    match.match.isExact && match.line.candidateRank == 0
+                )
+            }
             if let nearest = nearbyLevels.min(by: { $0.distance < $1.distance }) {
-                return (match.match.item, nearest.level, match.match.isExact)
+                return (
+                    match.match.item,
+                    nearest.level,
+                    match.match.isExact && match.line.candidateRank == 0
+                )
             }
         }
 
@@ -160,9 +227,10 @@ actor VideoSpriteAnalyzer {
     private func linesIncludingJoinedFragments(_ lines: [OCRLine]) -> [OCRLine] {
         var expanded = lines
         var joinedTexts = Set(lines.map { normalize($0.text) })
+        let primaryLines = lines.filter { $0.candidateRank == 0 }
 
-        for anchor in lines {
-            let row = lines
+        for anchor in primaryLines {
+            let row = primaryLines
                 .filter { candidate in
                     abs(candidate.box.midY - anchor.box.midY) < 0.025
                 }
@@ -177,29 +245,63 @@ actor VideoSpriteAnalyzer {
             expanded.append(OCRLine(
                 text: joinedText,
                 confidence: row.map(\.confidence).min() ?? 0,
-                box: joinedBox
+                box: joinedBox,
+                candidateRank: 0
             ))
+        }
+
+        // Fortnite wraps long titles onto two rows. Pair large neighboring rows
+        // so "GUMMY LOOTIN'" + "LLAMA SPRITE" maps to Gummy Llama rather than
+        // incorrectly collapsing to the base Llama entry.
+        let rowCandidates = expanded.filter { $0.candidateRank == 0 }
+        let largestHeight = rowCandidates.map(\.box.height).max() ?? 0
+        for firstIndex in rowCandidates.indices {
+            for secondIndex in rowCandidates.indices where secondIndex > firstIndex {
+                let first = rowCandidates[firstIndex]
+                let second = rowCandidates[secondIndex]
+                let verticalDistance = abs(first.box.midY - second.box.midY)
+                guard largestHeight > 0,
+                      first.box.height >= largestHeight * 0.48,
+                      second.box.height >= largestHeight * 0.48,
+                      verticalDistance >= 0.025,
+                      verticalDistance <= 0.24 else { continue }
+
+                let ordered = [first, second].sorted { $0.box.midY > $1.box.midY }
+                let joinedText = ordered.map(\.text).joined(separator: " ")
+                guard joinedTexts.insert(normalize(joinedText)).inserted else { continue }
+                expanded.append(OCRLine(
+                    text: joinedText,
+                    confidence: min(first.confidence, second.confidence),
+                    box: first.box.union(second.box),
+                    candidateRank: 0
+                ))
+            }
         }
 
         return expanded
     }
 
-    private func catalogMatch(from recognizedText: String) -> CatalogMatch? {
-        let normalizedLine = normalize(recognizedText)
-            .replacingOccurrences(of: "spr1te", with: "sprite")
-            .replacingOccurrences(of: "sprlte", with: "sprite")
-            .replacingOccurrences(of: "sprtte", with: "sprite")
-        guard normalizedLine.contains("sprite") else { return nil }
+    private func catalogMatch(
+        from recognizedText: String,
+        allowNameWithoutSprite: Bool
+    ) -> CatalogMatch? {
+        let normalizedLine = canonicalOCRText(recognizedText)
+        let containsSprite = normalizedLine.contains("sprite")
+        guard containsSprite || allowNameWithoutSprite else { return nil }
 
-        // Check longer names first so "Gold Water Sprite" never becomes Water.
+        // Check longer names first so variants never collapse into their base.
         if let exact = catalogByLongestName
             .first(where: { item in
-                normalizedLine.contains(normalize(item.name) + "sprite")
+                let name = normalize(item.name)
+                return normalizedLine.contains(name + "sprite")
+                    || (allowNameWithoutSprite && normalizedLine.contains(name))
             }) {
             return CatalogMatch(item: exact, isExact: true)
         }
 
-        let target = normalizedLine.replacingOccurrences(of: "sprite", with: "")
+        let target = normalizedLine
+            .replacingOccurrences(of: "mastered", with: "")
+            .replacingOccurrences(of: "sprite", with: "")
         let ranked = catalog.map { item in
             (item: item, distance: editDistance(target, normalize(item.name)))
         }.sorted { $0.distance < $1.distance }
@@ -223,6 +325,43 @@ actor VideoSpriteAnalyzer {
             }
         }
         return nil
+    }
+
+    private func detectedRarity(in lines: [OCRLine]) -> SpriteRarity? {
+        for line in lines where line.candidateRank == 0 {
+            let text = normalize(line.text)
+            for rarity in SpriteRarity.allCases {
+                let token = normalize(rarity.rawValue)
+                if text == token
+                    || text.hasPrefix(token + "lvl")
+                    || (text.count <= token.count + 4 && text.contains(token)) {
+                    return rarity
+                }
+            }
+        }
+        return nil
+    }
+
+    private func canonicalOCRText(_ value: String) -> String {
+        var text = normalize(value)
+            .replacingOccurrences(of: "lootin", with: "")
+            .replacingOccurrences(of: "spr1te", with: "sprite")
+            .replacingOccurrences(of: "sprlte", with: "sprite")
+            .replacingOccurrences(of: "sprtte", with: "sprite")
+            .replacingOccurrences(of: "h0lofoil", with: "holofoil")
+            .replacingOccurrences(of: "gummv", with: "gummy")
+            .replacingOccurrences(of: "summy", with: "gummy")
+            .replacingOccurrences(of: "galaky", with: "galaxy")
+        if text.hasPrefix("ofoil") {
+            text = "hol" + text
+        }
+        if !text.contains("holofoil"), let foilRange = text.range(of: "foil") {
+            text.replaceSubrange(foilRange, with: "holofoil")
+        }
+        if !text.contains("galaxy"), let laxyRange = text.range(of: "laxy") {
+            text.replaceSubrange(laxyRange, with: "galaxy")
+        }
+        return text
     }
 
     private func record(
@@ -269,6 +408,7 @@ private struct OCRLine {
     let text: String
     let confidence: Float
     let box: CGRect
+    let candidateRank: Int
 }
 
 private struct CatalogMatch {
