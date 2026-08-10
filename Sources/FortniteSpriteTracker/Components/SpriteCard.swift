@@ -4,6 +4,7 @@ struct SpriteCard: View {
     let item: SpriteItem
     let onOwned: () -> Void
     let onMastered: () -> Void
+    let onLevel: (Int?) -> Void
 
     @State private var hovered = false
     @State private var burst = false
@@ -31,18 +32,49 @@ struct SpriteCard: View {
                 .buttonStyle(.borderedProminent)
                 .tint(item.owned ? .green.opacity(0.85) : .white.opacity(0.12))
 
-                Button(action: {
-                    onMastered()
-                    if !item.mastered {
-                        burst = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { burst = false }
+                Menu {
+                    Section("Current level") {
+                        ForEach(1...5, id: \.self) { level in
+                            Button {
+                                onLevel(level)
+                                if level == 5, !item.mastered {
+                                    burst = true
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { burst = false }
+                                }
+                            } label: {
+                                Label(
+                                    "Level \(level)",
+                                    systemImage: item.level == level ? "checkmark.circle.fill" : "\(level).circle"
+                                )
+                            }
+                        }
                     }
-                }) {
-                    Image(systemName: item.mastered ? "star.fill" : "star")
-                        .frame(width: 20)
+
+                    Divider()
+
+                    Button {
+                        onMastered()
+                    } label: {
+                        Label(
+                            item.mastered ? "Clear Level 5" : "Set Level 5 (Mastered)",
+                            systemImage: item.mastered ? "crown" : "crown.fill"
+                        )
+                    }
+
+                    Button {
+                        onLevel(nil)
+                    } label: {
+                        Label("Clear Level", systemImage: "xmark.circle")
+                    }
+                } label: {
+                    Image(systemName: levelControlSymbol)
+                        .foregroundStyle(item.mastered ? Color.yellow : Color.primary)
+                        .frame(width: 24, height: 20)
                 }
-                .buttonStyle(.bordered)
-                .help("Mastered = Level 5")
+                .menuStyle(.borderlessButton)
+                .frame(width: 48, height: 28)
+                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+                .help("Set the exact level or Mastered crown")
             }
         }
         .padding(12)
@@ -97,7 +129,10 @@ struct SpriteCard: View {
         }
         .overlay(alignment: .topTrailing) {
             if item.mastered {
-                Text("LVL 5")
+                HStack(spacing: 4) {
+                    Image(systemName: "crown.fill")
+                    Text(item.level == 5 ? "LVL 5" : "MASTERED")
+                }
                     .font(.system(size: 9, weight: .black, design: .rounded))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
@@ -105,6 +140,14 @@ struct SpriteCard: View {
                     .foregroundStyle(.black)
                     .padding(8)
                     .transition(.scale.combined(with: .opacity))
+            } else if let level = item.level {
+                Text("LVL \(level)")
+                    .font(.system(size: 9, weight: .black, design: .rounded))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(.white.opacity(0.85), in: Capsule())
+                    .foregroundStyle(.black)
+                    .padding(8)
             }
         }
     }
@@ -120,7 +163,7 @@ struct SpriteCard: View {
     @ViewBuilder
     private var statusIcon: some View {
         if item.mastered {
-            Image(systemName: "star.circle.fill")
+            Image(systemName: "crown.fill")
                 .symbolEffect(.bounce, value: item.mastered)
                 .foregroundStyle(.yellow)
         } else if item.owned {
@@ -136,6 +179,16 @@ struct SpriteCard: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(.white.opacity(0.12), in: Capsule())
+    }
+
+    private var levelControlSymbol: String {
+        if item.mastered {
+            return "crown.fill"
+        }
+        if let level = item.level {
+            return "\(level).circle.fill"
+        }
+        return "slider.horizontal.3"
     }
 
     private var cardBackground: some View {

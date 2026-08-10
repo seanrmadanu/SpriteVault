@@ -7,8 +7,10 @@ A native SwiftUI macOS checklist for all 117 Fortnite Sprites in the supplied Fo
 - Separate **Owned** and **Mastered** states (Mastered = Level 5)
 - Persistent local progress in Application Support
 - Screen-recording import
-- Vision OCR frame analysis to auto-detect Sprite names
-- Auto-marks a detected Sprite as Mastered when the same frame contains `LEVEL 5`, `LVL 5`, `LEVEL: 5`, or `MASTERED`
+- Vision OCR reads only the selected Sprite's right-side name and level
+- Matches that name to the built-in catalog for its rarity/type
+- Marks a detected Sprite as owned, saves its exact level, and marks it Mastered only when that same Sprite is Level 5
+- Requires the same name/level in at least two frames and lets you review results before applying them
 - Heavy motion/UI polish: animated background, staggered card entrances, hover tilt, floating Sprite artwork, spring transitions, progress-ring animation, numeric count transitions, scanline import animation, symbol effects, toast animations, mastered sparkles, animated filter panel, and more
 - Honors macOS Reduce Motion for the animated background
 
@@ -18,10 +20,10 @@ A native SwiftUI macOS checklist for all 117 Fortnite Sprites in the supplied Fo
 3. Run on **My Mac**.
 
 ## Best recording workflow
-In Fortnite, slowly scroll through the Sprite inventory. Keep each Sprite name and its level/status visible for roughly one second. The current auto-detector is text-driven; it is much more reliable when the UI text is clear and not motion-blurred.
+In Fortnite, move the selection across the Sprite inventory. Keep each selected Sprite's name and level visible in the right-side details panel for roughly two seconds. The detector ignores the left grid, so a Level 5 label on another card cannot affect the selected Sprite.
 
 ## Important limitation
-The checklist now has visual reference art for every Sprite, but recording auto-detection is still text-driven. If Fortnite does **not** show the Sprite name/level on screen, OCR cannot identify it yet. The next upgrade should add visual-reference matching (Vision feature prints or a small Core ML classifier) using these bundled Sprite images as references.
+Recording detection is intentionally based on the right-side selected-Sprite details. A Sprite is not imported unless both its name and level are readable there in at least two sampled frames.
 
 ## Image loading fix
 Sprite PNGs are SwiftPM processed resources. SwiftPM can flatten nested resource directories, so the app now checks the resource bundle root first and then the original SpriteImages paths. If an asset cannot be found, the card displays the exact missing filename instead of a generic placeholder.

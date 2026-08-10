@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var showFilters = false
     @State private var toastVisible = false
     @State private var sparkle = false
+    @State private var showResetConfirmation = false
 
     private let columns = [GridItem(.adaptive(minimum: 190, maximum: 260), spacing: 14)]
 
@@ -23,11 +24,24 @@ struct ContentView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 14) {
                         ForEach(filteredSprites) { item in
-                            SpriteCard(item: item) {
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) { store.toggleOwned(item) }
-                            } onMastered: {
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) { store.toggleMastered(item) }
-                            }
+                            SpriteCard(
+                                item: item,
+                                onOwned: {
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+                                        store.toggleOwned(item)
+                                    }
+                                },
+                                onMastered: {
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+                                        store.toggleMastered(item)
+                                    }
+                                },
+                                onLevel: { level in
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+                                        store.setLevel(level, for: item)
+                                    }
+                                }
+                            )
                         }
                     }
                     .padding(22)
@@ -43,6 +57,12 @@ struct ContentView: View {
         }
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showImporter) { VideoImportSheet().environmentObject(store) }
+        .alert("Clear all tracking data?", isPresented: $showResetConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear All", role: .destructive) { store.reset() }
+        } message: {
+            Text("This removes all owned, level, and mastery values.")
+        }
         .onChange(of: store.recentEvent) { _, event in
             guard event != nil else { return }
             withAnimation(.spring(response: 0.4, dampingFraction: 0.72)) { toastVisible = true }
@@ -69,7 +89,7 @@ struct ContentView: View {
             Spacer()
 
             ProgressPill(title: "Owned", value: store.ownedCount, total: store.sprites.count, symbol: "checkmark")
-            ProgressPill(title: "Mastered", value: store.masteredCount, total: store.sprites.count, symbol: "star.fill")
+            ProgressPill(title: "Mastered", value: store.masteredCount, total: store.sprites.count, symbol: "crown.fill")
                 .symbolEffect(.pulse, value: sparkle)
 
             Button {
@@ -111,8 +131,8 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
 
-                Button("Reset") {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { store.reset() }
+                Button("Clear All") {
+                    showResetConfirmation = true
                 }
                 .buttonStyle(.bordered)
             }
@@ -161,7 +181,7 @@ struct ContentView: View {
     private func toast(_ event: SpriteEvent) -> some View {
         VStack {
             HStack(spacing: 10) {
-                Image(systemName: event.kind == .mastered ? "star.fill" : event.kind == .owned ? "checkmark.circle.fill" : "minus.circle.fill")
+                Image(systemName: event.kind == .mastered ? "crown.fill" : event.kind == .owned ? "checkmark.circle.fill" : "minus.circle.fill")
                     .foregroundStyle(event.kind == .mastered ? .yellow : event.kind == .owned ? .green : .secondary)
                     .symbolEffect(.bounce, value: toastVisible)
                 Text(event.kind == .mastered ? "\(event.name) mastered — Level 5" : event.kind == .owned ? "\(event.name) added" : "\(event.name) removed")

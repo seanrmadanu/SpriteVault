@@ -13,13 +13,17 @@ struct VideoImportSheet: View {
     @State private var results: [DetectedSprite] = []
     @State private var errorText: String?
     @State private var scanning = false
+    @State private var replaceExisting = true
+    @State private var resultsApplied = false
+    @State private var showResetConfirmation = false
+    @State private var hasAnalyzed = false
 
     var body: some View {
         VStack(spacing: 22) {
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Auto-check from recording").font(.title2.weight(.black))
-                    Text("The app samples frames, reads Fortnite UI text, matches Sprite names, and marks Level 5 as Mastered.")
+                    Text("Reads only the selected Sprite's right-side name and level, then matches it to the catalog.")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -55,10 +59,10 @@ struct VideoImportSheet: View {
             }
             .frame(height: 220)
 
-            if analyzing || !results.isEmpty {
+            if analyzing || hasAnalyzed {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text(analyzing ? "Analyzing…" : "Detected \(results.count) Sprite\(results.count == 1 ? "" : "s")")
+                        Text(analysisHeading)
                             .font(.headline)
                         Spacer()
                         Text("\(Int(progress * 100))%")
@@ -80,13 +84,16 @@ struct VideoImportSheet: View {
                     LazyVStack(spacing: 8) {
                         ForEach(results, id: \.self) { result in
                             HStack {
-                                Image(systemName: result.mastered ? "star.fill" : "checkmark.circle.fill")
+                                Image(systemName: result.mastered ? "crown.fill" : "checkmark.circle.fill")
                                     .foregroundStyle(result.mastered ? .yellow : .green)
                                 Text(result.name).fontWeight(.semibold)
                                 Spacer()
-                                Text(result.mastered ? "MASTERED · LVL 5" : "OWNED")
+                                Text(result.mastered ? "MASTERED · LVL 5" : "LVL \(result.level)")
                                     .font(.caption2.weight(.black))
                                     .foregroundStyle(.secondary)
+                                Text("\(result.rarity.rawValue) · RIGHT PANEL · \(result.observations)x")
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.tertiary)
                                 Text(timestamp(result.timestamp))
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.tertiary)
@@ -100,23 +107,62 @@ struct VideoImportSheet: View {
                 .frame(maxHeight: 190)
             }
 
+            if !results.isEmpty {
+                VStack(alignment: .leading, spacing: 9) {
+                    Picker("Apply mode", selection: $replaceExisting) {
+                        Text("Replace incorrect tracking").tag(true)
+                        Text("Merge with current tracking").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+
+                    HStack {
+                        Text(replaceExisting
+                             ? "Clears the old result, then marks only the selected Sprites detected in this recording."
+                             : "Updates detected Sprites but leaves every other saved entry unchanged.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button(resultsApplied ? "Applied" : "Apply Reviewed Results") {
+                            store.applyDetections(results, replacingExisting: replaceExisting)
+                            resultsApplied = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(resultsApplied)
+                    }
+                }
+            }
+
             if let errorText {
                 Text(errorText).foregroundStyle(.red).font(.caption)
             }
 
             HStack {
-                Text("Tip: scroll slowly through your Sprite inventory so each name/level stays visible for about a second.")
+                Button("Clear Incorrect Tracking", role: .destructive) {
+                    showResetConfirmation = true
+                }
+
+                Text("Tip: keep each selected Sprite's right-side name and level visible for 2 seconds.")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("Analyze & Auto-check") { analyze() }
+                Button("Analyze Recording") { analyze() }
                     .buttonStyle(.borderedProminent)
                     .disabled(fileURL == nil || analyzing)
                     .keyboardShortcut(.defaultAction)
             }
         }
         .padding(26)
-        .frame(width: 760, height: 690)
+        .frame(width: 820, height: 760)
         .background(AnimatedBackground())
+        .alert("Clear all tracking data?", isPresented: $showResetConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear All", role: .destructive) {
+                store.reset()
+                resultsApplied = false
+                hasAnalyzed = false
+            }
+        } message: {
+            Text("This removes the incorrect owned, level, and mastery values. It cannot be undone inside the app.")
+        }
         .fileImporter(isPresented: $isImporterOpen, allowedContentTypes: [.movie, .mpeg4Movie, .quickTimeMovie]) { result in
             switch result {
             case .success(let url):
@@ -124,6 +170,8 @@ struct VideoImportSheet: View {
                 results = []
                 progress = 0
                 errorText = nil
+                resultsApplied = false
+                hasAnalyzed = false
             case .failure(let error):
                 errorText = error.localizedDescription
             }
@@ -137,6 +185,8 @@ struct VideoImportSheet: View {
         results = []
         errorText = nil
         progress = 0
+        resultsApplied = false
+        hasAnalyzed = false
 
         Task {
             let didAccess = fileURL.startAccessingSecurityScopedResource()
@@ -154,14 +204,20 @@ struct VideoImportSheet: View {
                         progress = 1
                         analyzing = false
                         scanning = false
+                        hasAnalyzed = true
                     }
-                    for result in found { store.applyDetection(name: result.name, mastered: result.mastered) }
+                    if found.isEmpty {
+                        scanText = "No name and level were confirmed twice. Hold each selection still for 2 seconds."
+                    } else {
+                        scanText = "Review the detections before applying them."
+                    }
                 }
             } catch {
                 await MainActor.run {
                     errorText = error.localizedDescription
                     analyzing = false
                     scanning = false
+                    hasAnalyzed = true
                 }
             }
         }
@@ -171,5 +227,15 @@ struct VideoImportSheet: View {
         let m = Int(value) / 60
         let s = Int(value) % 60
         return String(format: "%d:%02d", m, s)
+    }
+
+    private var analysisHeading: String {
+        if analyzing {
+            return "Analyzing…"
+        }
+        if results.isEmpty {
+            return "No confirmed Sprites"
+        }
+        return "Detected \(results.count) Sprite\(results.count == 1 ? "" : "s")"
     }
 }
