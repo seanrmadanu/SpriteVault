@@ -10,7 +10,8 @@ A native SwiftUI macOS checklist for all 117 Fortnite Sprites in the supplied Fo
 - Vision OCR reads only the selected Sprite's right-side name and level
 - Matches that name to the built-in catalog for its rarity/type
 - Marks a detected Sprite as owned, saves its exact level, and marks it Mastered only when that same Sprite is Level 5
-- Requires the same name/level in at least two frames and lets you review results before applying them
+- Accepts an exact right-panel catalog match immediately; fuzzy OCR still requires matching frames
+- Samples roughly three times per second and lets you review results before applying them
 - Heavy motion/UI polish: animated background, staggered card entrances, hover tilt, floating Sprite artwork, spring transitions, progress-ring animation, numeric count transitions, scanline import animation, symbol effects, toast animations, mastered sparkles, animated filter panel, and more
 - Honors macOS Reduce Motion for the animated background
 
@@ -20,10 +21,10 @@ A native SwiftUI macOS checklist for all 117 Fortnite Sprites in the supplied Fo
 3. Run on **My Mac**.
 
 ## Best recording workflow
-In Fortnite, move the selection across the Sprite inventory. Keep each selected Sprite's name and level visible in the right-side details panel for roughly two seconds. The detector ignores the left grid, so a Level 5 label on another card cannot affect the selected Sprite.
+In Fortnite, move the selection onto every Sprite card; merely scrolling past a row does not expose every card's name. Keep each selected Sprite's name and level visible in the right-side details panel for roughly one second. The detector ignores the left grid, so a Level 5 label on another card cannot affect the selected Sprite.
 
 ## Important limitation
-Recording detection is intentionally based on the right-side selected-Sprite details. A Sprite is not imported unless both its name and level are readable there in at least two sampled frames.
+Recording detection is intentionally based on the right-side selected-Sprite details. A Sprite is not imported unless both its name and level are readable there. Exact catalog matches may be accepted from one frame; typo-tolerant matches require repeated agreement.
 
 ## Image loading fix
 Sprite PNGs are SwiftPM processed resources. SwiftPM can flatten nested resource directories, so the app now checks the resource bundle root first and then the original SpriteImages paths. If an asset cannot be found, the card displays the exact missing filename instead of a generic placeholder.

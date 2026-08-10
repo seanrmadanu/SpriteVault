@@ -141,7 +141,7 @@ struct VideoImportSheet: View {
                     showResetConfirmation = true
                 }
 
-                Text("Tip: keep each selected Sprite's right-side name and level visible for 2 seconds.")
+                Text("Select every card. Scrolling past a row only reads the one card highlighted on the right.")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Analyze Recording") { analyze() }
@@ -207,7 +207,7 @@ struct VideoImportSheet: View {
                         hasAnalyzed = true
                     }
                     if found.isEmpty {
-                        scanText = "No name and level were confirmed twice. Hold each selection still for 2 seconds."
+                        scanText = "No readable name and level found. Make sure each card is actually selected for 1 second."
                     } else {
                         scanText = "Review the detections before applying them."
                     }
