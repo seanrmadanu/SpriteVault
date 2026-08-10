@@ -31,3 +31,10 @@ Sprite PNGs are SwiftPM processed resources. SwiftPM can flatten nested resource
 - Configures the SwiftUI window as resizable and full-screen-primary, so the green traffic-light button enters native full screen.
 - Removed the in-app full-screen button.
 - Search uses a native NSSearchField, preserves its live field editor while typing, and explicitly makes the tracker window key when clicked.
+
+## Startup performance
+- Visible Sprite artwork is decoded into 320 px thumbnails on a four-operation background queue instead of blocking SwiftUI's main thread.
+- Recently viewed images are cached, so view updates and scrolling do not reopen the same PNG repeatedly.
+- Removed the permanent floating animation from every card and the staggered launch animation.
+- Replaced per-card material/blur effects and nine blurred background circles with cheaper gradients.
+- Progress is no longer rewritten to disk during the initial load; later saves run on a utility queue.

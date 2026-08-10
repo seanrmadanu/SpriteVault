@@ -2,14 +2,11 @@ import SwiftUI
 
 struct SpriteCard: View {
     let item: SpriteItem
-    let index: Int
     let onOwned: () -> Void
     let onMastered: () -> Void
 
     @State private var hovered = false
-    @State private var appeared = false
     @State private var burst = false
-    @State private var imageFloating = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -60,20 +57,11 @@ struct SpriteCard: View {
                     .symbolEffect(.variableColor.iterative, isActive: burst)
             }
         }
-        .scaleEffect(hovered ? 1.035 : (appeared ? 1 : 0.88))
+        .scaleEffect(hovered ? 1.025 : 1)
         .rotation3DEffect(.degrees(hovered ? 1.8 : 0), axis: (x: -0.6, y: 1, z: 0))
-        .shadow(color: .black.opacity(hovered ? 0.38 : 0.2), radius: hovered ? 22 : 9, y: hovered ? 12 : 5)
-        .opacity(appeared ? 1 : 0)
+        .shadow(color: .black.opacity(hovered ? 0.32 : 0.17), radius: hovered ? 16 : 6, y: hovered ? 9 : 4)
         .onHover { inside in
             withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) { hovered = inside }
-        }
-        .onAppear {
-            withAnimation(.spring(response: 0.55, dampingFraction: 0.78).delay(Double(index % 18) * 0.018)) {
-                appeared = true
-            }
-            withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true).delay(Double(index % 7) * 0.08)) {
-                imageFloating = true
-            }
         }
     }
 
@@ -83,15 +71,20 @@ struct SpriteCard: View {
                 .fill(spriteBackdrop)
 
             Circle()
-                .fill(.white.opacity(hovered ? 0.13 : 0.06))
-                .frame(width: 128, height: 128)
-                .blur(radius: hovered ? 3 : 8)
+                .fill(
+                    RadialGradient(
+                        colors: [.white.opacity(hovered ? 0.14 : 0.07), .clear],
+                        center: .center,
+                        startRadius: 0,
+                        endRadius: 72
+                    )
+                )
+                .frame(width: 144, height: 144)
                 .scaleEffect(hovered ? 1.1 : 0.9)
 
             spriteImage
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(8)
-                .offset(y: imageFloating ? -3 : 3)
                 .scaleEffect(hovered ? 1.08 : 1)
                 .rotationEffect(.degrees(hovered ? -1.5 : 0))
                 .animation(.spring(response: 0.35, dampingFraction: 0.68), value: hovered)
@@ -118,42 +111,10 @@ struct SpriteCard: View {
 
     @ViewBuilder
     private var spriteImage: some View {
-        if let nsImage = loadSpriteImage() {
-            Image(nsImage: nsImage)
-                .resizable()
-                .scaledToFit()
-                .accessibilityLabel(item.name)
-        } else {
-            VStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 30))
-                Text("Missing image")
-                    .font(.caption.bold())
-                Text(item.imageAssetName + ".png")
-                    .font(.caption2.monospaced())
-                    .lineLimit(1)
-            }
-            .foregroundStyle(.secondary)
-        }
-    }
-
-    private func loadSpriteImage() -> NSImage? {
-        // SwiftPM's `.process("Resources")` may flatten nested resource folders
-        // inside Bundle.module. Try the flattened location first, then the
-        // original subdirectory so this also works if Xcode preserves it.
-        let candidates: [URL?] = [
-            Bundle.module.url(forResource: item.imageAssetName, withExtension: "png"),
-            Bundle.module.url(forResource: item.imageAssetName, withExtension: "png", subdirectory: "SpriteImages"),
-            Bundle.module.url(forResource: item.imageAssetName, withExtension: "png", subdirectory: "Resources/SpriteImages")
-        ]
-
-        for candidate in candidates {
-            if let url = candidate, let image = NSImage(contentsOf: url) {
-                return image
-            }
-        }
-
-        return nil
+        CachedSpriteImage(
+            assetName: item.imageAssetName,
+            accessibilityLabel: item.name
+        )
     }
 
     @ViewBuilder
@@ -179,7 +140,7 @@ struct SpriteCard: View {
 
     private var cardBackground: some View {
         RoundedRectangle(cornerRadius: 20, style: .continuous)
-            .fill(.ultraThinMaterial)
+            .fill(Color(red: 0.115, green: 0.115, blue: 0.125).opacity(0.96))
             .overlay {
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .fill(item.mastered ? .yellow.opacity(0.08) : item.owned ? .green.opacity(0.05) : .clear)

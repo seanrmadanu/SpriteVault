@@ -8,23 +8,46 @@ struct AnimatedBackground: View {
         ZStack {
             LinearGradient(colors: [Color.black, Color(red: 0.07, green: 0.06, blue: 0.13)], startPoint: .topLeading, endPoint: .bottomTrailing)
 
-            ForEach(0..<9, id: \.self) { i in
-                Circle()
-                    .fill(.white.opacity(i.isMultiple(of: 2) ? 0.055 : 0.025))
-                    .frame(width: CGFloat(80 + i * 31), height: CGFloat(80 + i * 31))
-                    .blur(radius: 18)
-                    .offset(
-                        x: drift ? CGFloat((i % 3) * 170 - 240) : CGFloat((i % 4) * 130 - 280),
-                        y: drift ? CGFloat((i % 4) * 150 - 220) : CGFloat((i % 3) * 190 - 250)
-                    )
-            }
+            glow(
+                color: .purple,
+                size: 520,
+                from: CGSize(width: -330, height: -250),
+                to: CGSize(width: -180, height: -120)
+            )
+            glow(
+                color: .indigo,
+                size: 460,
+                from: CGSize(width: 360, height: 250),
+                to: CGSize(width: 220, height: 140)
+            )
+            glow(
+                color: .blue,
+                size: 340,
+                from: CGSize(width: 270, height: -310),
+                to: CGSize(width: 390, height: -170)
+            )
         }
         .ignoresSafeArea()
+        .allowsHitTesting(false)
         .onAppear {
             guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 11).repeatForever(autoreverses: true)) {
+            withAnimation(.easeInOut(duration: 16).repeatForever(autoreverses: true)) {
                 drift.toggle()
             }
         }
+    }
+
+    private func glow(color: Color, size: CGFloat, from: CGSize, to: CGSize) -> some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    colors: [color.opacity(0.13), color.opacity(0.035), .clear],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: size / 2
+                )
+            )
+            .frame(width: size, height: size)
+            .offset(drift ? to : from)
     }
 }

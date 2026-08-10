@@ -11,6 +11,8 @@ struct ContentView: View {
     private let columns = [GridItem(.adaptive(minimum: 190, maximum: 260), spacing: 14)]
 
     var body: some View {
+        let filteredSprites = store.filteredSprites
+
         ZStack {
             AnimatedBackground()
 
@@ -20,8 +22,8 @@ struct ContentView: View {
 
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 14) {
-                        ForEach(Array(store.filteredSprites.enumerated()), id: \.element.id) { index, item in
-                            SpriteCard(item: item, index: index) {
+                        ForEach(filteredSprites) { item in
+                            SpriteCard(item: item) {
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) { store.toggleOwned(item) }
                             } onMastered: {
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) { store.toggleMastered(item) }
@@ -29,7 +31,7 @@ struct ContentView: View {
                         }
                     }
                     .padding(22)
-                    .animation(.spring(response: 0.42, dampingFraction: 0.85), value: store.filteredSprites.count)
+                    .animation(.spring(response: 0.42, dampingFraction: 0.85), value: filteredSprites.count)
                 }
             }
 

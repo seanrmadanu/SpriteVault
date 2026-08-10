@@ -12,6 +12,8 @@ final class SpriteStore: ObservableObject {
     @Published var recentEvent: SpriteEvent?
 
     private let saveURL: URL
+    private var hasFinishedLoading = false
+    private let saveQueue = DispatchQueue(label: "Sprite progress saving", qos: .utility)
 
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -19,6 +21,7 @@ final class SpriteStore: ObservableObject {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         saveURL = folder.appendingPathComponent("sprites.json")
         load()
+        hasFinishedLoading = true
     }
 
     var ownedCount: Int { sprites.filter(\.owned).count }
@@ -105,8 +108,14 @@ final class SpriteStore: ObservableObject {
     }
 
     private func save() {
-        guard !sprites.isEmpty, let data = try? JSONEncoder().encode(sprites) else { return }
-        try? data.write(to: saveURL, options: .atomic)
+        guard hasFinishedLoading,
+              !sprites.isEmpty,
+              let data = try? JSONEncoder().encode(sprites) else { return }
+
+        let destination = saveURL
+        saveQueue.async {
+            try? data.write(to: destination, options: .atomic)
+        }
     }
 
     private func normalized(_ s: String) -> String {
