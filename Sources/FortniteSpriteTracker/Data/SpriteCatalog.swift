@@ -120,4 +120,9 @@ enum SpriteCatalog {
         .init(name: "Galaxy Peely", rarity: .special),
         .init(name: "Holofoil Peely", rarity: .special)
     ]
+
+    static func blankCollection() -> [SpriteItem] {
+        all.map { SpriteItem(name: $0.name, rarity: $0.rarity) }
+    }
+
 }

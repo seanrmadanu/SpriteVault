@@ -3,11 +3,15 @@ import AppKit
 
 struct ContentView: View {
     @EnvironmentObject private var store: SpriteStore
-    @State private var showImporter = false
+
+    @State private var activeSheet: ContentSheet?
     @State private var showFilters = false
     @State private var toastVisible = false
     @State private var sparkle = false
     @State private var showResetConfirmation = false
+    @State private var showDeleteProfileConfirmation = false
+    @State private var isExportingPDF = false
+    @State private var statusMessage: AppStatusMessage?
 
     private let columns = [GridItem(.adaptive(minimum: 190, maximum: 260), spacing: 14)]
 
@@ -49,19 +53,51 @@ struct ContentView: View {
                 }
             }
 
-            if toastVisible, let event = store.recentEvent {
-                toast(event)
+            if let statusMessage {
+                appStatusToast(statusMessage)
+                    .transition(.move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.92)))
+                    .zIndex(30)
+            } else if toastVisible, let event = store.recentEvent {
+                spriteToast(event)
                     .transition(.move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.9)))
                     .zIndex(20)
             }
         }
         .preferredColorScheme(.dark)
-        .sheet(isPresented: $showImporter) { VideoImportSheet().environmentObject(store) }
-        .alert("Clear all tracking data?", isPresented: $showResetConfirmation) {
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .importer:
+                VideoImportSheet(initialProfileID: store.selectedProfileID)
+                    .environmentObject(store)
+            case .profileEditor(let mode):
+                ProfileEditorSheet(mode: mode)
+                    .environmentObject(store)
+            case .comparison(let primaryID, let comparisonID):
+                ProfileComparisonSheet(
+                    primaryProfileID: primaryID,
+                    initialComparisonProfileID: comparisonID
+                )
+                .environmentObject(store)
+            }
+        }
+        .alert("Clear \(store.selectedProfileName)?", isPresented: $showResetConfirmation) {
             Button("Cancel", role: .cancel) {}
-            Button("Clear All", role: .destructive) { store.reset() }
+            Button("Clear Profile", role: .destructive) { store.reset() }
         } message: {
-            Text("This removes all owned, level, and mastery values.")
+            Text("This removes owned, level, and mastery values only from this profile. Other profiles are not changed.")
+        }
+        .confirmationDialog(
+            "Delete \(store.selectedProfileName)?",
+            isPresented: $showDeleteProfileConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Profile", role: .destructive) {
+                store.deleteProfile(store.selectedProfileID)
+                showStatus("Profile deleted", symbol: "trash.fill", isError: false)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes this profile and its collection data. The last remaining profile cannot be deleted.")
         }
         .onChange(of: store.recentEvent) { _, event in
             guard event != nil else { return }
@@ -77,33 +113,122 @@ struct ContentView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 3) {
+        HStack(alignment: .top, spacing: 24) {
+            VStack(alignment: .leading, spacing: 7) {
                 Text("SPRITE VAULT")
                     .font(.system(size: 27, weight: .black, design: .rounded))
                     .tracking(1.8)
                 Text("Fortnite collection checklist")
                     .foregroundStyle(.secondary)
+                profileMenu
             }
 
-            Spacer()
+            Spacer(minLength: 18)
 
-            ProgressPill(title: "Owned", value: store.ownedCount, total: store.sprites.count, symbol: "checkmark")
-            ProgressPill(title: "Mastered", value: store.masteredCount, total: store.sprites.count, symbol: "crown.fill")
-                .symbolEffect(.pulse, value: sparkle)
+            VStack(alignment: .trailing, spacing: 10) {
+                HStack(spacing: 10) {
+                    ProgressPill(title: "Owned", value: store.ownedCount, total: store.sprites.count, symbol: "checkmark")
+                    ProgressPill(title: "Mastered", value: store.masteredCount, total: store.sprites.count, symbol: "crown.fill")
+                        .symbolEffect(.pulse, value: sparkle)
+                }
 
-            Button {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { showImporter = true }
-            } label: {
-                Label("Import Recording", systemImage: "wand.and.stars.inverse")
-                    .fontWeight(.bold)
+                HStack(spacing: 9) {
+                    Button {
+                        presentComparison()
+                    } label: {
+                        Label("Compare", systemImage: "arrow.left.arrow.right")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(store.profiles.count < 2)
+                    .help(store.profiles.count < 2 ? "Create a second profile before comparing." : "Compare two profile collections")
+
+                    Button(action: exportPDF) {
+                        Label(isExportingPDF ? "Exporting..." : "Export PDF", systemImage: isExportingPDF ? "hourglass" : "square.and.arrow.up")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isExportingPDF || store.selectedProfile == nil)
+
+                    Button {
+                        activeSheet = .importer
+                    } label: {
+                        Label("Import Recording", systemImage: "wand.and.stars.inverse")
+                            .fontWeight(.bold)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .controlSize(.large)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
         }
         .padding(.horizontal, 22)
         .padding(.top, 18)
         .padding(.bottom, 14)
+    }
+
+    private var profileMenu: some View {
+        Menu {
+            Section("Switch Profile") {
+                ForEach(store.profiles) { profile in
+                    Button {
+                        store.selectProfile(profile.id)
+                    } label: {
+                        Label(
+                            profile.name,
+                            systemImage: profile.id == store.selectedProfileID
+                                ? "checkmark.circle.fill"
+                                : "person.crop.circle"
+                        )
+                    }
+                }
+            }
+
+            Divider()
+
+            Button {
+                activeSheet = .profileEditor(.create)
+            } label: {
+                Label("New Profile", systemImage: "person.crop.circle.badge.plus")
+            }
+
+            Button {
+                activeSheet = .profileEditor(
+                    .rename(
+                        profileID: store.selectedProfileID,
+                        currentName: store.selectedProfileName
+                    )
+                )
+            } label: {
+                Label("Rename Current Profile", systemImage: "pencil")
+            }
+
+            Button(role: .destructive) {
+                showDeleteProfileConfirmation = true
+            } label: {
+                Label("Delete Current Profile", systemImage: "trash")
+            }
+            .disabled(!store.canDeleteProfile)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "person.crop.circle.fill")
+                    .foregroundStyle(.cyan)
+                Text(store.selectedProfileName)
+                    .font(.subheadline.weight(.bold))
+                    .lineLimit(1)
+                Text("\(store.profiles.count)")
+                    .font(.caption2.monospacedDigit().weight(.black))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.white.opacity(0.10), in: Capsule())
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.black))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.08)))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var filters: some View {
@@ -131,7 +256,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
 
-                Button("Clear All") {
+                Button("Clear Profile") {
                     showResetConfirmation = true
                 }
                 .buttonStyle(.bordered)
@@ -178,16 +303,17 @@ struct ContentView: View {
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: selected)
     }
 
-    private func toast(_ event: SpriteEvent) -> some View {
+    private func spriteToast(_ event: SpriteEvent) -> some View {
         VStack {
             HStack(spacing: 10) {
                 Image(systemName: event.kind == .mastered ? "crown.fill" : event.kind == .owned ? "checkmark.circle.fill" : "minus.circle.fill")
                     .foregroundStyle(event.kind == .mastered ? .yellow : event.kind == .owned ? .green : .secondary)
                     .symbolEffect(.bounce, value: toastVisible)
-                Text(event.kind == .mastered ? "\(event.name) mastered — Level 5" : event.kind == .owned ? "\(event.name) added" : "\(event.name) removed")
+                Text(event.kind == .mastered ? "\(event.name) mastered - Level 5" : event.kind == .owned ? "\(event.name) added" : "\(event.name) removed")
                     .fontWeight(.bold)
             }
-            .padding(.horizontal, 18).padding(.vertical, 12)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
             .background(.regularMaterial, in: Capsule())
             .overlay(Capsule().stroke(.white.opacity(0.14)))
             .shadow(radius: 18, y: 8)
@@ -195,4 +321,97 @@ struct ContentView: View {
         }
         .padding(.top, 14)
     }
+
+    private func appStatusToast(_ message: AppStatusMessage) -> some View {
+        VStack {
+            HStack(spacing: 10) {
+                Image(systemName: message.symbol)
+                    .foregroundStyle(message.isError ? .red : .green)
+                Text(message.text)
+                    .fontWeight(.bold)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().stroke((message.isError ? Color.red : Color.white).opacity(0.18)))
+            .shadow(radius: 18, y: 8)
+            Spacer()
+        }
+        .padding(.top, 14)
+    }
+
+    private func presentComparison() {
+        guard let comparisonProfile = store.profiles.first(where: { $0.id != store.selectedProfileID }) else {
+            showStatus("Create a second profile before comparing.", symbol: "person.crop.circle.badge.plus", isError: true)
+            return
+        }
+        activeSheet = .comparison(
+            primaryID: store.selectedProfileID,
+            comparisonID: comparisonProfile.id
+        )
+    }
+
+    private func exportPDF() {
+        guard !isExportingPDF, let profile = store.selectedProfile else { return }
+        isExportingPDF = true
+
+        Task { @MainActor in
+            await Task.yield()
+            defer { isExportingPDF = false }
+
+            do {
+                if let url = try CollectionPDFExporter.export(profile: profile) {
+                    showStatus("Exported \(url.lastPathComponent)", symbol: "doc.fill", isError: false)
+                }
+            } catch {
+                showStatus(error.localizedDescription, symbol: "exclamationmark.triangle.fill", isError: true)
+            }
+        }
+    }
+
+    private func showStatus(_ text: String, symbol: String, isError: Bool) {
+        let message = AppStatusMessage(text: text, symbol: symbol, isError: isError)
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.78)) {
+            statusMessage = message
+        }
+
+        Task {
+            try? await Task.sleep(for: .seconds(isError ? 3.5 : 2.3))
+            await MainActor.run {
+                guard statusMessage?.id == message.id else { return }
+                withAnimation(.easeOut(duration: 0.25)) {
+                    statusMessage = nil
+                }
+            }
+        }
+    }
+}
+
+private enum ContentSheet: Identifiable {
+    case importer
+    case profileEditor(ProfileEditorMode)
+    case comparison(primaryID: UUID, comparisonID: UUID)
+
+    var id: String {
+        switch self {
+        case .importer:
+            "importer"
+        case .profileEditor(let mode):
+            switch mode {
+            case .create:
+                "profile-create"
+            case .rename(let profileID, _):
+                "profile-rename-\(profileID.uuidString)"
+            }
+        case .comparison(let primaryID, let comparisonID):
+            "comparison-\(primaryID.uuidString)-\(comparisonID.uuidString)"
+        }
+    }
+}
+
+private struct AppStatusMessage: Identifiable {
+    let id = UUID()
+    let text: String
+    let symbol: String
+    let isError: Bool
 }

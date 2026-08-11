@@ -5,8 +5,12 @@ A native SwiftUI macOS checklist for all 117 Fortnite Sprites in the supplied Fo
 ## Features
 - 117 Sprite checklist with the actual Sprite artwork extracted from the supplied PDF
 - Separate **Owned** and **Mastered** states (Mastered = Level 5)
-- Persistent local progress in Application Support
-- Screen-recording import
+- Multiple named profiles with completely separate local collection progress
+- Automatic migration of the previous single `sprites.json` collection into **My Collection**
+- Profile-to-profile comparison for shared ownership, unique Sprites, and level differences
+- One-page poster PDF export with family names on the left and Normal/Cube/Gold/Quack/Gummy/Galaxy/Gem/Holofoil columns on the right
+- PDF cells show artwork and level when owned, a crown at Level 5, a lock when unowned, and a dark dashed cell when that variant does not exist
+- Screen-recording import includes a target-profile picker, so one recording cannot overwrite another profile by accident
 - Vision OCR reads only the selected Sprite's right-side name and level
 - Matches that name to the built-in catalog for its rarity/type
 - Marks a detected Sprite as owned, saves its exact level, and marks it Mastered only when that same Sprite is Level 5
@@ -43,3 +47,13 @@ Sprite PNGs are SwiftPM processed resources. SwiftPM can flatten nested resource
 - Removed the permanent floating animation from every card and the staggered launch animation.
 - Replaced per-card material/blur effects and nine blurred background circles with cheaper gradients.
 - Progress is no longer rewritten to disk during the initial load; later saves run on a utility queue.
+
+
+## Profiles
+Use the profile menu below the **SPRITE VAULT** title to create, rename, delete, or switch profiles. To scan a friend's collection, create their profile, open the recording importer, and select that profile as the target before applying the reviewed detections. Each profile is stored independently in `profiles.json`. The app preserves an existing pre-profile collection by migrating `sprites.json` into **My Collection** on first launch.
+
+## PDF export
+Select a profile and choose **Export PDF**. The app creates a single tall poster-style PDF based on the checklist layout: one row per Sprite family and columns for every variant type in the built-in catalog. Owned cells include the Sprite artwork and exact level; Level 5 receives a crown. Unowned existing variants receive a lock, while impossible variants use a dark dashed placeholder.
+
+## Compare profiles
+Create at least two profiles, select the first one, and choose **Compare**. The comparison sheet reports both totals, shared ownership, Sprites owned by only one profile, and level or mastery differences.

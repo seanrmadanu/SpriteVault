@@ -5,6 +5,7 @@ struct VideoImportSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: SpriteStore
 
+    @State private var targetProfileID: UUID
     @State private var fileURL: URL?
     @State private var isImporterOpen = false
     @State private var analyzing = false
@@ -18,6 +19,10 @@ struct VideoImportSheet: View {
     @State private var showResetConfirmation = false
     @State private var hasAnalyzed = false
 
+    init(initialProfileID: UUID) {
+        _targetProfileID = State(initialValue: initialProfileID)
+    }
+
     var body: some View {
         VStack(spacing: 22) {
             HStack {
@@ -25,6 +30,19 @@ struct VideoImportSheet: View {
                     Text("Auto-check from recording").font(.title2.weight(.black))
                     Text("Reads the selected title, level, and Mastered banner from a high-resolution right-side crop.")
                         .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Label("Target profile", systemImage: "person.crop.circle.fill")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.cyan)
+                        Picker("Target profile", selection: $targetProfileID) {
+                            ForEach(store.profiles) { profile in
+                                Text(profile.name).tag(profile.id)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 230)
+                        .disabled(analyzing)
+                    }
                 }
                 Spacer()
                 Button("Done") { dismiss() }
@@ -117,13 +135,18 @@ struct VideoImportSheet: View {
 
                     HStack {
                         Text(replaceExisting
-                             ? "Clears the old result, then marks only the selected Sprites detected in this recording."
-                             : "Updates detected Sprites but leaves every other saved entry unchanged.")
+                             ? "Clears \(targetProfileName), then marks only the selected Sprites detected in this recording."
+                             : "Updates detected Sprites in \(targetProfileName) but leaves every other saved entry unchanged.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Spacer()
                         Button(resultsApplied ? "Applied" : "Apply Reviewed Results") {
-                            store.applyDetections(results, replacingExisting: replaceExisting)
+                            store.applyDetections(
+                                results,
+                                to: targetProfileID,
+                                replacingExisting: replaceExisting
+                            )
+                            store.selectProfile(targetProfileID)
                             resultsApplied = true
                         }
                         .buttonStyle(.borderedProminent)
@@ -137,7 +160,7 @@ struct VideoImportSheet: View {
             }
 
             HStack {
-                Button("Clear Incorrect Tracking", role: .destructive) {
+                Button("Clear Target Profile", role: .destructive) {
                     showResetConfirmation = true
                 }
 
@@ -153,15 +176,18 @@ struct VideoImportSheet: View {
         .padding(26)
         .frame(width: 820, height: 760)
         .background(AnimatedBackground())
-        .alert("Clear all tracking data?", isPresented: $showResetConfirmation) {
+        .alert("Clear \(targetProfileName)?", isPresented: $showResetConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Clear All", role: .destructive) {
-                store.reset()
+                store.reset(profileID: targetProfileID)
                 resultsApplied = false
                 hasAnalyzed = false
             }
         } message: {
-            Text("This removes the incorrect owned, level, and mastery values. It cannot be undone inside the app.")
+            Text("This removes owned, level, and mastery values only from this profile. Other profiles are not changed.")
+        }
+        .onChange(of: targetProfileID) { _, _ in
+            resultsApplied = false
         }
         .fileImporter(isPresented: $isImporterOpen, allowedContentTypes: [.movie, .mpeg4Movie, .quickTimeMovie]) { result in
             switch result {
@@ -227,6 +253,10 @@ struct VideoImportSheet: View {
         let m = Int(value) / 60
         let s = Int(value) % 60
         return String(format: "%d:%02d", m, s)
+    }
+
+    private var targetProfileName: String {
+        store.profile(withID: targetProfileID)?.name ?? "Selected Profile"
     }
 
     private var analysisHeading: String {
