@@ -4,6 +4,7 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject private var store: SpriteStore
     @EnvironmentObject private var liveCapture: LiveCaptureManager
+    @EnvironmentObject private var activityStore: ActivityStore
 
     @State private var activeSheet: ContentSheet?
     @State private var showFilters = false
@@ -13,6 +14,8 @@ struct ContentView: View {
     @State private var showDeleteProfileConfirmation = false
     @State private var isExportingPDF = false
     @State private var statusMessage: AppStatusMessage?
+    @State private var showActivityCenter = false
+    @State private var highlightedSpriteName: String?
 
     private let columns = [GridItem(.adaptive(minimum: 190, maximum: 260), spacing: 14)]
 
@@ -26,42 +29,65 @@ struct ContentView: View {
                 header
                 filters
 
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 14) {
-                        ForEach(filteredSprites) { item in
-                            SpriteCard(
-                                item: item,
-                                onOwned: {
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
-                                        store.toggleOwned(item)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 14) {
+                            ForEach(filteredSprites) { item in
+                                SpriteCard(
+                                    item: item,
+                                    highlighted: highlightedSpriteName == item.name,
+                                    onOwned: {
+                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+                                            store.toggleOwned(item)
+                                        }
+                                    },
+                                    onMastered: {
+                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+                                            store.toggleMastered(item)
+                                        }
+                                    },
+                                    onLevel: { level in
+                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+                                            store.setLevel(level, for: item)
+                                        }
                                     }
-                                },
-                                onMastered: {
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
-                                        store.toggleMastered(item)
-                                    }
-                                },
-                                onLevel: { level in
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
-                                        store.setLevel(level, for: item)
-                                    }
+                                )
+                                .id(item.name)
+                            }
+                        }
+                        .padding(.horizontal, 22)
+                        .padding(.top, 34)
+                        .padding(.bottom, 100)
+                        .animation(.spring(response: 0.42, dampingFraction: 0.85), value: filteredSprites.count)
+                    }
+                    .scrollClipDisabled()
+                    .onChange(of: store.focusRequest) { _, request in
+                        guard let request else { return }
+                        highlightedSpriteName = request.name
+                        withAnimation(.spring(response: 0.48, dampingFraction: 0.82)) {
+                            proxy.scrollTo(request.name, anchor: .center)
+                        }
+                        Task {
+                            try? await Task.sleep(for: .seconds(2.5))
+                            await MainActor.run {
+                                guard highlightedSpriteName == request.name else { return }
+                                withAnimation(.easeOut(duration: 0.3)) {
+                                    highlightedSpriteName = nil
                                 }
-                            )
+                            }
                         }
                     }
-                    .padding(22)
-                    .animation(.spring(response: 0.42, dampingFraction: 0.85), value: filteredSprites.count)
                 }
             }
 
             if let statusMessage {
                 appStatusToast(statusMessage)
                     .transition(.move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.92)))
-                    .zIndex(30)
+                    .zIndex(300)
             } else if toastVisible, let event = store.recentEvent {
                 spriteToast(event)
                     .transition(.move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.9)))
-                    .zIndex(20)
+                    .zIndex(300)
             }
         }
         .preferredColorScheme(.dark)
@@ -74,6 +100,7 @@ struct ContentView: View {
                 LiveCaptureSheet()
                     .environmentObject(store)
                     .environmentObject(liveCapture)
+                    .environmentObject(activityStore)
             case .profileEditor(let mode):
                 ProfileEditorSheet(mode: mode)
                     .environmentObject(store)
@@ -89,7 +116,7 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
             Button("Clear Profile", role: .destructive) { store.reset() }
         } message: {
-            Text("This removes owned, level, and mastery values only from this profile. Other profiles are not changed.")
+            Text("This removes unlocked, lost, level, and mastery values only from this profile. Other profiles are not changed.")
         }
         .confirmationDialog(
             "Delete \(store.selectedProfileName)?",
@@ -105,9 +132,16 @@ struct ContentView: View {
             Text("This permanently deletes this profile and its collection data. The last remaining profile cannot be deleted.")
         }
         .onAppear {
-            liveCapture.installGlobalHotkey(store: store)
+            liveCapture.installGlobalHotkey(store: store, activityStore: activityStore)
             if liveCapture.targetProfileID == nil {
                 liveCapture.targetProfileID = store.selectedProfileID
+            }
+            routePendingNotificationIfNeeded()
+            Task { await liveCapture.refreshSources() }
+        }
+        .onChange(of: store.selectedProfileID) { _, id in
+            if !liveCapture.isHotkeyScanning {
+                liveCapture.targetProfileID = id
             }
         }
         .onChange(of: liveCapture.resultRevision) { _, _ in
@@ -141,6 +175,27 @@ struct ContentView: View {
                 }
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .spriteNotificationSelected)) { note in
+            guard let name = note.userInfo?["spriteName"] as? String else { return }
+            _ = AppNotificationService.shared.consumePendingDestination()
+            showActivityCenter = false
+            store.focusSprite(named: name)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activityNotificationSelected)) { _ in
+            _ = AppNotificationService.shared.consumePendingDestination()
+            showActivityCenter = true
+        }
+    }
+
+    private func routePendingNotificationIfNeeded() {
+        guard let destination = AppNotificationService.shared.consumePendingDestination() else { return }
+        switch destination {
+        case .sprite(let name):
+            showActivityCenter = false
+            store.focusSprite(named: name)
+        case .activity:
+            showActivityCenter = true
+        }
     }
 
     private var header: some View {
@@ -161,6 +216,9 @@ struct ContentView: View {
                     ProgressPill(title: "Owned", value: store.ownedCount, total: store.sprites.count, symbol: "checkmark")
                     ProgressPill(title: "Mastered", value: store.masteredCount, total: store.sprites.count, symbol: "crown.fill")
                         .symbolEffect(.pulse, value: sparkle)
+                    if store.lostCount > 0 {
+                        ProgressPill(title: "Lost", value: store.lostCount, total: store.sprites.count, symbol: "clock.arrow.circlepath")
+                    }
                 }
 
                 HStack(spacing: 9) {
@@ -171,7 +229,6 @@ struct ContentView: View {
                     }
                     .buttonStyle(.bordered)
                     .disabled(store.profiles.count < 2)
-                    .help(store.profiles.count < 2 ? "Create a second profile before comparing." : "Compare two profile collections")
 
                     Button(action: exportPDF) {
                         Label(isExportingPDF ? "Exporting..." : "Export PDF", systemImage: isExportingPDF ? "hourglass" : "square.and.arrow.up")
@@ -180,14 +237,31 @@ struct ContentView: View {
                     .disabled(isExportingPDF || store.selectedProfile == nil)
 
                     Button {
-                        activeSheet = .liveCapture
+                        showActivityCenter.toggle()
                     } label: {
-                        Label(
-                            liveCapture.isStreaming ? "Live Scan" : "Live Capture",
-                            systemImage: liveCapture.isStreaming ? "dot.radiowaves.left.and.right" : "camera.viewfinder"
-                        )
+                        ZStack(alignment: .topTrailing) {
+                            Label("Activity", systemImage: "bell")
+                            if activityStore.unreadCount > 0 {
+                                Text("\(min(activityStore.unreadCount, 99))")
+                                    .font(.system(size: 8, weight: .black, design: .rounded))
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(.red, in: Capsule())
+                                    .foregroundStyle(.white)
+                                    .offset(x: 9, y: -7)
+                            }
+                        }
                     }
                     .buttonStyle(.bordered)
+                    .popover(isPresented: $showActivityCenter, arrowEdge: .top) {
+                        ActivityCenterView()
+                            .environmentObject(activityStore)
+                            .environmentObject(store)
+                    }
+
+                    LiveCaptureHeaderButton(liveCapture: liveCapture) {
+                        activeSheet = .liveCapture
+                    }
 
                     Button {
                         activeSheet = .importer
@@ -232,10 +306,7 @@ struct ContentView: View {
 
             Button {
                 activeSheet = .profileEditor(
-                    .rename(
-                        profileID: store.selectedProfileID,
-                        currentName: store.selectedProfileName
-                    )
+                    .rename(profileID: store.selectedProfileID, currentName: store.selectedProfileName)
                 )
             } label: {
                 Label("Rename Current Profile", systemImage: "pencil")
@@ -297,10 +368,8 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
 
-                Button("Clear Profile") {
-                    showResetConfirmation = true
-                }
-                .buttonStyle(.bordered)
+                Button("Clear Profile") { showResetConfirmation = true }
+                    .buttonStyle(.bordered)
             }
 
             if showFilters {
@@ -386,10 +455,7 @@ struct ContentView: View {
             showStatus("Create a second profile before comparing.", symbol: "person.crop.circle.badge.plus", isError: true)
             return
         }
-        activeSheet = .comparison(
-            primaryID: store.selectedProfileID,
-            comparisonID: comparisonProfile.id
-        )
+        activeSheet = .comparison(primaryID: store.selectedProfileID, comparisonID: comparisonProfile.id)
     }
 
     private func exportPDF() {
@@ -420,9 +486,7 @@ struct ContentView: View {
             try? await Task.sleep(for: .seconds(isError ? 3.5 : 2.3))
             await MainActor.run {
                 guard statusMessage?.id == message.id else { return }
-                withAnimation(.easeOut(duration: 0.25)) {
-                    statusMessage = nil
-                }
+                withAnimation(.easeOut(duration: 0.25)) { statusMessage = nil }
             }
         }
     }
@@ -436,19 +500,15 @@ private enum ContentSheet: Identifiable {
 
     var id: String {
         switch self {
-        case .importer:
-            "importer"
-        case .liveCapture:
-            "live-capture"
+        case .importer: return "importer"
+        case .liveCapture: return "live-capture"
         case .profileEditor(let mode):
             switch mode {
-            case .create:
-                "profile-create"
-            case .rename(let profileID, _):
-                "profile-rename-\(profileID.uuidString)"
+            case .create: return "profile-create"
+            case .rename(let profileID, _): return "profile-rename-\(profileID.uuidString)"
             }
         case .comparison(let primaryID, let comparisonID):
-            "comparison-\(primaryID.uuidString)-\(comparisonID.uuidString)"
+            return "comparison-\(primaryID.uuidString)-\(comparisonID.uuidString)"
         }
     }
 }

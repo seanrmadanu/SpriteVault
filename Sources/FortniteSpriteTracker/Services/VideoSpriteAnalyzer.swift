@@ -8,13 +8,24 @@ struct DetectedSprite: Identifiable, Hashable, Sendable {
 
     let name: String
     let rarity: SpriteRarity
-    let owned: Bool
-    let level: Int
+    let status: SpriteCollectionStatus
+    let level: Int?
     let mastered: Bool
     let timestamp: Double
     let observations: Int
     var catalogIndex: Int? = nil
     var gridSlot: Int? = nil
+
+    var owned: Bool { status.isUnlocked }
+}
+
+struct SpriteFrameAnalysis: Sendable {
+    let detections: [DetectedSprite]
+    let isCollectionScreen: Bool
+    let visibleSlots: Int
+    let inferredPageStart: Int?
+    let lockedSlots: Set<Int>
+    let selectedSpriteName: String?
 }
 
 actor VideoSpriteAnalyzer {
@@ -91,7 +102,7 @@ actor VideoSpriteAnalyzer {
             return DetectedSprite(
                 name: tally.item.name,
                 rarity: tally.item.rarity,
-                owned: true,
+                status: .collected,
                 level: level,
                 mastered: level == 5,
                 timestamp: tally.firstTimestamp,

@@ -126,7 +126,7 @@ struct VideoImportSheet: View {
                                 Text(result.name)
                                     .fontWeight(.semibold)
                                 Spacer()
-                                Text(result.mastered ? "MASTERED · LVL 5" : "LVL \(result.level)")
+                                Text(result.mastered ? "MASTERED · LVL 5" : result.level.map { "LVL \($0)" } ?? (result.status == .lost ? "LOST" : "UNLOCKED"))
                                     .font(.caption2.weight(.black))
                                     .foregroundStyle(.secondary)
                                 Text(resultSourceText(result))

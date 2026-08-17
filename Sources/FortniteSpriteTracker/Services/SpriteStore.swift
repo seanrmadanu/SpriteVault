@@ -12,6 +12,7 @@ final class SpriteStore: ObservableObject {
     @Published var showOnlyNotOwned = false
     @Published var showOnlyMastered = false
     @Published var recentEvent: SpriteEvent?
+    @Published var focusRequest: SpriteFocusRequest?
 
     private let profilesURL: URL
     private let legacySaveURL: URL
@@ -49,6 +50,10 @@ final class SpriteStore: ObservableObject {
 
     var masteredCount: Int {
         selectedProfile?.masteredCount ?? 0
+    }
+
+    var lostCount: Int {
+        selectedProfile?.lostCount ?? 0
     }
 
     var canDeleteProfile: Bool {
@@ -123,10 +128,12 @@ final class SpriteStore: ObservableObject {
         var event: SpriteEvent?
         mutateSelectedProfile { profile in
             guard let index = profile.sprites.firstIndex(where: { $0.id == item.id }) else { return }
-            profile.sprites[index].owned.toggle()
-            if !profile.sprites[index].owned {
+            if profile.sprites[index].owned {
+                profile.sprites[index].status = .locked
                 profile.sprites[index].level = nil
                 profile.sprites[index].mastered = false
+            } else {
+                profile.sprites[index].status = .collected
             }
             event = .init(
                 name: profile.sprites[index].name,
@@ -142,7 +149,9 @@ final class SpriteStore: ObservableObject {
             guard let index = profile.sprites.firstIndex(where: { $0.id == item.id }) else { return }
             profile.sprites[index].mastered.toggle()
             if profile.sprites[index].mastered {
-                profile.sprites[index].owned = true
+                if profile.sprites[index].status == .locked {
+                    profile.sprites[index].status = .collected
+                }
                 profile.sprites[index].level = 5
             } else if profile.sprites[index].level == 5 {
                 profile.sprites[index].level = nil
@@ -164,7 +173,9 @@ final class SpriteStore: ObservableObject {
             profile.sprites[index].level = validatedLevel
 
             if let validatedLevel {
-                profile.sprites[index].owned = true
+                if profile.sprites[index].status == .locked {
+                    profile.sprites[index].status = .collected
+                }
                 profile.sprites[index].mastered = validatedLevel == 5
             } else {
                 profile.sprites[index].mastered = false
@@ -201,7 +212,7 @@ final class SpriteStore: ObservableObject {
         mutateProfile(profileID) { profile in
             if replacingExisting {
                 for index in profile.sprites.indices {
-                    profile.sprites[index].owned = false
+                    profile.sprites[index].status = .locked
                     profile.sprites[index].mastered = false
                     profile.sprites[index].level = nil
                 }
@@ -213,12 +224,14 @@ final class SpriteStore: ObservableObject {
                 }) else { continue }
 
                 let before = profile.sprites[index]
-                profile.sprites[index].owned = detection.owned
-                profile.sprites[index].level = detection.level
-                profile.sprites[index].mastered = detection.level == 5
+                profile.sprites[index].status = detection.status
+                if let detectedLevel = detection.level {
+                    profile.sprites[index].level = detectedLevel
+                }
+                profile.sprites[index].mastered = detection.mastered || profile.sprites[index].level == 5
                 let after = profile.sprites[index]
 
-                guard before.owned != after.owned
+                guard before.status != after.status
                         || before.level != after.level
                         || before.mastered != after.mastered else {
                     continue
@@ -228,9 +241,9 @@ final class SpriteStore: ObservableObject {
                     DetectionCollectionChange(
                         name: after.name,
                         rarity: after.rarity,
-                        previousOwned: before.owned,
+                        previousStatus: before.status,
                         previousLevel: before.level,
-                        newOwned: after.owned,
+                        newStatus: after.status,
                         newLevel: after.level,
                         becameMastered: !before.mastered && after.mastered
                     )
@@ -243,6 +256,12 @@ final class SpriteStore: ObservableObject {
             scannedNames: detections.map(\.name),
             changes: changes
         )
+    }
+
+    func focusSprite(named name: String) {
+        guard sprites.contains(where: { normalized($0.name) == normalized(name) }) else { return }
+        clearFilters()
+        focusRequest = SpriteFocusRequest(name: name)
     }
 
     func setOwnedFilter(_ enabled: Bool) {
@@ -284,7 +303,7 @@ final class SpriteStore: ObservableObject {
     func reset(profileID: UUID) {
         mutateProfile(profileID) { profile in
             for index in profile.sprites.indices {
-                profile.sprites[index].owned = false
+                profile.sprites[index].status = .locked
                 profile.sprites[index].mastered = false
                 profile.sprites[index].level = nil
             }
@@ -335,7 +354,7 @@ final class SpriteStore: ObservableObject {
         guard hasFinishedLoading, !profiles.isEmpty else { return }
 
         let archive = ProfileArchive(
-            version: 1,
+            version: 2,
             selectedProfileID: selectedProfileID,
             profiles: profiles
         )
@@ -381,8 +400,11 @@ final class SpriteStore: ObservableObject {
 
             let validLevel = prior.level.flatMap { (1...5).contains($0) ? $0 : nil }
             item.level = validLevel
-            item.owned = prior.owned || validLevel != nil
-            item.mastered = validLevel == 5
+            item.status = prior.status
+            if item.status == .locked && (prior.owned || validLevel != nil) {
+                item.status = .collected
+            }
+            item.mastered = prior.mastered || validLevel == 5
             return item
         }
     }
@@ -427,20 +449,27 @@ private struct ProfileArchive: Codable {
 struct DetectionCollectionChange: Sendable, Equatable {
     let name: String
     let rarity: SpriteRarity
-    let previousOwned: Bool
+    let previousStatus: SpriteCollectionStatus
     let previousLevel: Int?
-    let newOwned: Bool
+    let newStatus: SpriteCollectionStatus
     let newLevel: Int?
     let becameMastered: Bool
 
+    var previousOwned: Bool { previousStatus.isUnlocked }
+    var newOwned: Bool { newStatus.isUnlocked }
+
     var isNewSprite: Bool {
-        !previousOwned && newOwned
+        previousStatus == .locked && newStatus.isUnlocked
     }
 
     var isLevelUp: Bool {
-        guard previousOwned,
+        guard previousStatus.isUnlocked,
               let newLevel else { return false }
         return newLevel > (previousLevel ?? 0)
+    }
+
+    var becameLost: Bool {
+        previousStatus != .lost && newStatus == .lost
     }
 }
 
@@ -448,21 +477,20 @@ struct DetectionApplySummary: Sendable, Equatable {
     let scannedNames: [String]
     let changes: [DetectionCollectionChange]
 
-    var newSprites: [DetectionCollectionChange] {
-        changes.filter(\.isNewSprite)
-    }
-
+    var newSprites: [DetectionCollectionChange] { changes.filter(\.isNewSprite) }
     var masteredSprites: [DetectionCollectionChange] {
         changes.filter { $0.becameMastered && !$0.isNewSprite }
     }
-
     var levelUps: [DetectionCollectionChange] {
         changes.filter { $0.isLevelUp && !$0.becameMastered && !$0.isNewSprite }
     }
+    var lostSprites: [DetectionCollectionChange] { changes.filter(\.becameLost) }
+    var updatedExistingCount: Int { changes.filter { !$0.isNewSprite }.count }
+}
 
-    var updatedExistingCount: Int {
-        changes.filter { !$0.isNewSprite }.count
-    }
+struct SpriteFocusRequest: Equatable {
+    let id = UUID()
+    let name: String
 }
 
 struct SpriteEvent: Equatable {

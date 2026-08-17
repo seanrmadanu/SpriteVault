@@ -1,57 +1,119 @@
 import Foundation
 import SwiftUI
+import AppKit
 import CoreGraphics
+import AVFoundation
+
+enum LiveScanPhase: String, Sendable {
+    case idle
+    case waitingForSource
+    case waitingForCollection
+    case waitingForStability
+    case scanning
+    case complete
+    case error
+
+    var label: String {
+        switch self {
+        case .idle: return "Idle"
+        case .waitingForSource: return "Waiting for source"
+        case .waitingForCollection: return "Waiting for Sprites"
+        case .waitingForStability: return "Waiting for screen to settle"
+        case .scanning: return "Scanning"
+        case .complete: return "Scan complete"
+        case .error: return "Needs attention"
+        }
+    }
+}
 
 @MainActor
 final class LiveCaptureManager: ObservableObject {
+    @Published private(set) var applications: [CaptureApplicationInfo] = []
     @Published private(set) var windows: [CaptureWindowInfo] = []
-    @Published var selectedWindowID: CGWindowID?
+    @Published private(set) var captureDevices: [CaptureDeviceInfo] = []
+
+    @Published var sourceMode: CaptureSourceMode {
+        didSet { persistSourceSelection() }
+    }
+    @Published var selectedApplicationID: String? {
+        didSet { persistSourceSelection(); resolvedApplicationTarget = nil }
+    }
+    @Published var selectedWindowID: CGWindowID? {
+        didSet { persistSourceSelection() }
+    }
+    @Published var selectedCaptureDeviceID: String? {
+        didSet { persistSourceSelection() }
+    }
     @Published var targetProfileID: UUID? {
-        didSet {
-            guard oldValue != targetProfileID else { return }
-            lastDetectionSignature = ""
-            pendingLiveSignature = ""
-            pendingLiveConfirmations = 0
-        }
+        didSet { lastDetectionSignature = "" }
     }
     @Published var framesPerSecond = 3
 
+    @Published private(set) var resolvedApplicationTarget: ResolvedCaptureTarget?
+    @Published private(set) var previewImage: NSImage?
     @Published private(set) var isRefreshing = false
     @Published private(set) var isStreaming = false
     @Published private(set) var isHotkeyScanning = false
     @Published private(set) var isCapturingOnce = false
-    @Published private(set) var statusText = "Choose the Fortnite, cloud-gaming, or capture window to scan."
+    @Published private(set) var statusText = "Choose how Sprite Vault should read Fortnite."
     @Published private(set) var errorText: String?
     @Published private(set) var latestDetections: [DetectedSprite] = []
     @Published private(set) var lastScanDate: Date?
     @Published private(set) var resultRevision = UUID()
     @Published private(set) var screenRecordingGranted = CGPreflightScreenCaptureAccess()
+    @Published private(set) var captureDeviceGranted = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
     @Published private(set) var accessibilityGranted = GlobalCaptureHotkey.shared.hasAccessibilityPermission
     @Published private(set) var notificationsGranted = false
-    @Published private(set) var hotkeyPagesScanned = 0
+    @Published private(set) var scanPhase: LiveScanPhase = .idle
+    @Published private(set) var sessionElapsedSeconds = 0
+    @Published private(set) var scanCoverageCount = 0
+    @Published private(set) var sessionObservedSpriteCount = 0
+    @Published private(set) var sessionNewCount = 0
+    @Published private(set) var sessionLevelUpCount = 0
+    @Published private(set) var sessionMasteredCount = 0
+    @Published private(set) var sessionLostCount = 0
+    @Published private(set) var isCollectionScreenDetected = false
+    @Published private(set) var lastCompletedSummary: ScanChangeSummary?
 
     private let captureService = ScreenCaptureService()
+    private let captureDeviceService = VideoCaptureDeviceService()
     private let notificationService = AppNotificationService.shared
     private weak var store: SpriteStore?
+    private weak var activityStore: ActivityStore?
 
-    private var lastDetectionSignature = ""
-    private var pendingLiveSignature = ""
-    private var pendingLiveConfirmations = 0
     private var hotkeyInstalled = false
+    private var lastDetectionSignature = ""
+    private var sessionTimerTask: Task<Void, Never>?
+    private var currentSessionID: UUID?
+    private var sessionInitialOwnedCount = 0
+    private var sessionProfileName = "My Collection"
+    private var sessionSeenNames = Set<String>()
+    private var coveredCatalogIndexes = Set<Int>()
+    private var shouldFinishAfterApply = false
+    private var newNames = Set<String>()
+    private var levelUpNames = Set<String>()
+    private var masteredNames = Set<String>()
+    private var lostNames = Set<String>()
 
-    private var hotkeyInitialOwnedCount = 0
-    private var hotkeyProfileName = "My Collection"
-    private var hotkeySeenNames = Set<String>()
-    private var hotkeyPageStarts = Set<Int>()
-    private var hotkeyCoveredCatalogIndexes = Set<Int>()
-    private var hotkeyReachedCatalogEnd = false
-    private var hotkeyShouldFinishAfterApply = false
-    private var hotkeyNewCount = 0
-    private var hotkeyUpdatedCount = 0
-    private var hotkeyMasteredCount = 0
+    private enum DefaultsKey {
+        static let mode = "capture.source.mode"
+        static let application = "capture.source.application"
+        static let window = "capture.source.window"
+        static let device = "capture.source.device"
+    }
 
-    func installGlobalHotkey(store: SpriteStore) {
+    init() {
+        let defaults = UserDefaults.standard
+        sourceMode = CaptureSourceMode(rawValue: defaults.string(forKey: DefaultsKey.mode) ?? "") ?? .application
+        selectedApplicationID = defaults.string(forKey: DefaultsKey.application)
+        let savedWindow = defaults.object(forKey: DefaultsKey.window) as? NSNumber
+        selectedWindowID = savedWindow.map { CGWindowID($0.uint32Value) }
+        selectedCaptureDeviceID = defaults.string(forKey: DefaultsKey.device)
+    }
+
+    func installGlobalHotkey(store: SpriteStore, activityStore: ActivityStore) {
         self.store = store
+        self.activityStore = activityStore
         guard !hotkeyInstalled else { return }
         hotkeyInstalled = true
 
@@ -79,446 +141,736 @@ final class LiveCaptureManager: ObservableObject {
     func requestScreenRecordingPermission() {
         screenRecordingGranted = CGRequestScreenCaptureAccess()
         statusText = screenRecordingGranted
-            ? "Screen Recording access granted. Refresh the window list."
-            : "Allow Screen Recording for Sprite Vault in System Settings. macOS may require the app to relaunch."
+            ? "Screen Recording access granted. Refresh capture sources."
+            : "Allow Screen Recording for Sprite Vault in System Settings. macOS may require a relaunch."
+    }
+
+    func requestCaptureDevicePermission() {
+        Task { [weak self] in
+            guard let self else { return }
+            let granted = await self.captureDeviceService.requestAuthorization()
+            self.captureDeviceGranted = granted
+            self.statusText = granted
+                ? "Capture-device access granted."
+                : "Camera access is required for USB capture devices."
+        }
     }
 
     func requestNotificationPermission() {
         Task { [weak self] in
             guard let self else { return }
             let granted = await self.notificationService.requestAuthorization()
-            await MainActor.run {
-                self.notificationsGranted = granted
-                self.statusText = granted
-                    ? "Notifications are ready for scan progress, new Sprites, level-ups, and mastery."
-                    : "Notifications are disabled. You can enable them for Sprite Vault in System Settings."
-            }
+            self.notificationsGranted = granted
+            self.statusText = granted
+                ? "Notifications are ready."
+                : "Notifications are disabled. Enable them in System Settings if you want scan alerts."
         }
     }
 
-    func refreshWindows() async {
+    func refreshSources() async {
         guard !isRefreshing else { return }
         isRefreshing = true
         errorText = nil
         defer { isRefreshing = false }
 
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
+        captureDeviceGranted = captureDeviceService.authorizationGranted
+        captureDevices = captureDeviceService.availableDevices()
+        if selectedCaptureDeviceID == nil || !captureDevices.contains(where: { $0.id == selectedCaptureDeviceID }) {
+            selectedCaptureDeviceID = captureDevices.first?.id
+        }
 
         do {
-            let available = try await captureService.availableWindows()
-            windows = available
+            let content = try await captureService.availableContent()
+            applications = content.applications
+            windows = content.windows
+
+            if let selectedApplicationID,
+               !applications.contains(where: { $0.id == selectedApplicationID }) {
+                self.selectedApplicationID = nil
+            }
+            if selectedApplicationID == nil {
+                selectedApplicationID = applications.first(where: \.isLikelyGameApplication)?.id
+                    ?? applications.first?.id
+            }
 
             if let selectedWindowID,
-               !available.contains(where: { $0.id == selectedWindowID }) {
+               !windows.contains(where: { $0.id == selectedWindowID }) {
                 self.selectedWindowID = nil
             }
-
             if selectedWindowID == nil {
-                self.selectedWindowID = available.first(where: \.isLikelyGameWindow)?.id
-                    ?? available.first?.id
+                selectedWindowID = windows.first(where: \.isLikelyGameWindow)?.id
+                    ?? windows.first?.id
             }
 
-            if available.isEmpty {
-                statusText = "No large shareable windows were found. Open Fortnite/cloud gaming first, then refresh."
-            } else if let selected = selectedWindow {
-                statusText = "Ready to scan \(selected.displayName)."
+            await resolveApplicationTarget()
+            statusText = sourceReadyDescription
+        } catch {
+            // Direct capture-device mode can still work without Screen Recording.
+            applications = []
+            windows = []
+            resolvedApplicationTarget = nil
+            if sourceMode == .captureDevice, !captureDevices.isEmpty {
+                statusText = sourceReadyDescription
             } else {
-                statusText = "Choose the window that contains Fortnite."
+                errorText = error.localizedDescription
+                statusText = "Could not enumerate shareable applications/windows."
             }
+        }
+    }
+
+    func resolveApplicationTarget() async {
+        guard sourceMode == .application, let selectedApplicationID else {
+            resolvedApplicationTarget = nil
+            return
+        }
+        do {
+            resolvedApplicationTarget = try await captureService.resolvedWindow(for: selectedApplicationID)
+        } catch {
+            resolvedApplicationTarget = nil
+        }
+    }
+
+    func refreshPreview() async {
+        guard !isStreaming else { return }
+        errorText = nil
+        do {
+            let image: CGImage
+            switch sourceMode {
+            case .application:
+                guard let target = try await resolveWindowForCurrentSource() else {
+                    throw LiveCaptureError.sourceUnavailable
+                }
+                image = try await captureService.captureOnce(windowID: target.windowID)
+            case .window:
+                guard let selectedWindowID else { throw LiveCaptureError.sourceUnavailable }
+                image = try await captureService.captureOnce(windowID: selectedWindowID)
+            case .captureDevice:
+                statusText = "Start a scan to preview the live capture device."
+                return
+            }
+            previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+            statusText = "Preview updated. Sprite Vault will still verify Sprites → Collection before saving anything."
         } catch {
             errorText = error.localizedDescription
-            statusText = "Could not read shareable windows."
         }
     }
 
     func captureOnce() async {
         guard !isCapturingOnce, !isStreaming else { return }
-
-        if selectedWindowID == nil {
-            await refreshWindows()
-        }
-        guard let windowID = selectedWindowID else {
-            errorText = "No capture window is selected. Open Live Capture and choose the Fortnite window first."
+        guard sourceMode != .captureDevice else {
+            errorText = "Capture Once is available for Application and Specific Window sources. Use Start Scan for a capture device."
             return
         }
 
         isCapturingOnce = true
         errorText = nil
-        statusText = "Capturing only the selected window…"
+        statusText = "Capturing the selected source…"
         defer { isCapturingOnce = false }
 
         do {
-            let image = try await captureService.captureOnce(windowID: windowID)
-            statusText = "Vision is scanning the captured Sprite grid…"
-            let detections = try await ScreenshotSpriteAnalyzer.shared.analyze(
+            let image: CGImage
+            if sourceMode == .application {
+                guard let target = try await resolveWindowForCurrentSource() else { throw LiveCaptureError.sourceUnavailable }
+                image = try await captureService.captureOnce(windowID: target.windowID)
+            } else {
+                guard let selectedWindowID else { throw LiveCaptureError.sourceUnavailable }
+                image = try await captureService.captureOnce(windowID: selectedWindowID)
+            }
+            previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+            let analysis = try await ScreenshotSpriteAnalyzer.shared.analyzeFrame(
                 image: image,
                 onProgress: { [weak self] _, text in
-                    Task { @MainActor in
-                        self?.statusText = text
-                    }
+                    Task { @MainActor in self?.statusText = text }
                 }
             )
-            receive(detections, requiresLiveConfirmation: false)
+            receive(analysis)
         } catch {
             errorText = error.localizedDescription
             statusText = "Capture failed."
         }
     }
 
-    /// Starts the one-press collection scan used by Control + Option + S.
-    /// The stream keeps running while the player moves through the Collection
-    /// and stops itself after the final catalog region has been covered.
+    /// Control + Option + S starts one collection session. A second hotkey press
+    /// does not stop it; the scan ends automatically only after all 117 catalog
+    /// positions have actually been covered, or by the explicit Stop control.
     func startHotkeyScanSession() async {
         guard !isHotkeyScanning else {
             notificationService.send(
                 title: "Sprite Scan Already Active",
-                body: "Keep scrolling through the Collection. The scan will stop automatically when it reaches the end.",
-                identifier: "sprite-scan-already-active"
+                body: "The current scan is still running. Fast scrolling is ignored until the grid becomes stable.",
+                identifier: "sprite-scan-already-active",
+                openActivityCenter: true
             )
             return
         }
+        guard !isStreaming, !isCapturingOnce else { return }
 
-        guard !isStreaming, !isCapturingOnce else {
-            notificationService.send(
-                title: "Sprite Scan Busy",
-                body: "Another capture is already running. Stop it before starting the hotkey scan.",
-                identifier: "sprite-scan-busy"
-            )
-            return
+        if applications.isEmpty && windows.isEmpty && captureDevices.isEmpty {
+            await refreshSources()
         }
+        guard await ensureSourceReady() else { return }
 
-        if selectedWindowID == nil {
-            await refreshWindows()
-        }
-        guard selectedWindowID != nil else {
-            errorText = "No capture window is selected. Open Live Capture once and choose the Fortnite window."
-            notificationService.send(
-                title: "Sprite Scan Couldn't Start",
-                body: "Open Sprite Vault and choose the Fortnite or streaming window first.",
-                identifier: "sprite-scan-no-window"
-            )
-            return
-        }
-
-        if targetProfileID == nil {
-            targetProfileID = store?.selectedProfileID
-        }
-
+        if targetProfileID == nil { targetProfileID = store?.selectedProfileID }
         if !notificationsGranted {
             notificationsGranted = await notificationService.requestAuthorization()
         }
 
-        resetHotkeySessionState()
-        hotkeyInitialOwnedCount = targetProfile?.ownedCount ?? 0
-        hotkeyProfileName = targetProfile?.name ?? "My Collection"
+        resetSessionState()
+        currentSessionID = UUID()
+        sessionInitialOwnedCount = targetProfile?.ownedCount ?? 0
+        sessionProfileName = targetProfile?.name ?? "My Collection"
         isHotkeyScanning = true
         errorText = nil
-        lastDetectionSignature = ""
-        pendingLiveSignature = ""
-        pendingLiveConfirmations = 0
+        scanPhase = .waitingForSource
+        startSessionTimer()
 
+        let startEvent = ActivityEvent(
+            kind: .scanStarted,
+            title: "Sprite scan started",
+            message: "Reading \(sessionProfileName) from \(selectedSourceDisplayName).",
+            profileID: targetProfileID,
+            profileName: sessionProfileName,
+            sessionID: currentSessionID
+        )
+        activityStore?.add(startEvent)
         notificationService.send(
             title: "Sprite Scan Started",
-            body: "Hotkey activated. Reading \(hotkeyProfileName). Scroll through Sprites using Sort By: Type; the scan will stop automatically when complete.",
-            identifier: "sprite-scan-started"
+            body: "Reading \(sessionProfileName). Fast scrolling will pause Vision until the collection is stable.",
+            identifier: "sprite-scan-started",
+            openActivityCenter: true
         )
 
         await startStreaming()
-
         if !isStreaming {
             isHotkeyScanning = false
+            stopSessionTimer()
+            scanPhase = .error
             notificationService.send(
                 title: "Sprite Scan Couldn't Start",
-                body: errorText ?? "Screen capture could not be started.",
-                identifier: "sprite-scan-start-failed"
+                body: errorText ?? "The selected capture source could not be started.",
+                identifier: "sprite-scan-start-failed",
+                openActivityCenter: true
             )
         }
     }
 
     func startStreaming() async {
-        if selectedWindowID == nil {
-            await refreshWindows()
-        }
-        guard let windowID = selectedWindowID else {
-            errorText = "Choose a capture window first."
-            return
-        }
-
         errorText = nil
         do {
-            try await captureService.start(
-                windowID: windowID,
-                fps: framesPerSecond,
-                onDetections: { [weak self] detections in
-                    Task { @MainActor in
-                        self?.receive(detections, requiresLiveConfirmation: true)
+            switch sourceMode {
+            case .application, .window:
+                let windowID: CGWindowID
+                if sourceMode == .application {
+                    guard let target = try await resolveWindowForCurrentSource() else {
+                        throw LiveCaptureError.sourceUnavailable
                     }
-                },
-                onStatus: { [weak self] status in
-                    Task { @MainActor in
-                        self?.statusText = status
-                    }
-                },
-                onError: { [weak self] error in
-                    Task { @MainActor in
-                        self?.handleStreamError(error)
-                    }
+                    windowID = target.windowID
+                } else {
+                    guard let selectedWindowID else { throw LiveCaptureError.sourceUnavailable }
+                    windowID = selectedWindowID
                 }
-            )
+
+                try await captureService.start(
+                    windowID: windowID,
+                    fps: framesPerSecond,
+                    onAnalysis: { [weak self] analysis in
+                        Task { @MainActor in self?.receive(analysis) }
+                    },
+                    onStatus: { [weak self] status in
+                        Task { @MainActor in self?.receiveCaptureStatus(status) }
+                    },
+                    onPreview: { [weak self] image in
+                        Task { @MainActor in
+                            self?.previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                        }
+                    },
+                    onError: { [weak self] error in
+                        Task { @MainActor in self?.handleStreamError(error) }
+                    }
+                )
+
+            case .captureDevice:
+                guard let selectedCaptureDeviceID else { throw LiveCaptureError.sourceUnavailable }
+                try await captureDeviceService.start(
+                    deviceID: selectedCaptureDeviceID,
+                    fps: framesPerSecond,
+                    onAnalysis: { [weak self] analysis in
+                        Task { @MainActor in self?.receive(analysis) }
+                    },
+                    onStatus: { [weak self] status in
+                        Task { @MainActor in self?.receiveCaptureStatus(status) }
+                    },
+                    onPreview: { [weak self] image in
+                        Task { @MainActor in
+                            self?.previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                        }
+                    },
+                    onError: { [weak self] error in
+                        Task { @MainActor in self?.handleStreamError(error) }
+                    }
+                )
+            }
+
             isStreaming = true
-            statusText = isHotkeyScanning
-                ? "Hotkey scan active. Scroll through the Sprite Collection; confirmed pages are merged once."
-                : "Live capture active at \(framesPerSecond) FPS. Only changed, confirmed detections are applied."
+            scanPhase = .waitingForCollection
+            statusText = "Capture active. Waiting for Fortnite Sprites → Collection…"
         } catch {
             isStreaming = false
             errorText = error.localizedDescription
-            statusText = "Could not start live capture."
+            statusText = "Could not start capture."
+            scanPhase = .error
         }
     }
 
     func stopStreaming() async {
-        await captureService.stop()
-        isStreaming = false
-
         if isHotkeyScanning {
-            isHotkeyScanning = false
-            hotkeyShouldFinishAfterApply = false
-            statusText = "Hotkey scan stopped before automatic completion."
-            notificationService.send(
-                title: "Sprite Scan Stopped",
-                body: "The collection scan was stopped before it reached automatic completion.",
-                identifier: "sprite-scan-stopped"
-            )
+            await finishHotkeyScanSession(completed: false)
+            return
         }
+        await stopCaptureEngine()
+        isStreaming = false
+        scanPhase = .idle
+        statusText = "Capture stopped."
     }
 
     func toggleStreaming() async {
-        if isStreaming {
-            await stopStreaming()
-        } else {
-            await startStreaming()
-        }
+        if isStreaming { await stopStreaming() }
+        else { await startHotkeyScanSession() }
     }
 
-    /// Called after ContentView merges the latest confirmed detections into the
-    /// selected profile. This is where notification-worthy collection changes
-    /// are derived, so duplicate frames never generate duplicate alerts.
     func reportAppliedChanges(_ summary: DetectionApplySummary, profileName: String) {
         guard isHotkeyScanning else { return }
+        sessionSeenNames.formUnion(summary.scannedNames)
+        sessionObservedSpriteCount = sessionSeenNames.count
 
-        hotkeySeenNames.formUnion(summary.scannedNames)
-        hotkeyNewCount += summary.newSprites.count
-        hotkeyUpdatedCount += summary.updatedExistingCount
-        hotkeyMasteredCount += summary.changes.filter(\.becameMastered).count
+        for change in summary.newSprites { newNames.insert(change.name) }
+        for change in summary.levelUps { levelUpNames.insert(change.name) }
+        for change in summary.changes where change.becameMastered { masteredNames.insert(change.name) }
+        for change in summary.lostSprites { lostNames.insert(change.name) }
+        refreshChangeCounters()
 
-        // A brand-new/empty profile is an initial sync, not a sequence of
-        // dozens of "new Sprite" events. It gets one completion summary instead.
-        if hotkeyInitialOwnedCount > 0 {
+        // Initial profile syncs get one detailed completion entry instead of a
+        // wall of system banners. Subsequent scans produce clickable alerts.
+        if sessionInitialOwnedCount > 0 {
             for change in summary.newSprites {
-                let levelText = change.newLevel.map { "Lvl \($0)" } ?? "Owned"
-                let masteryText = change.newLevel == 5 ? " · Mastered 👑" : ""
+                let levelText = change.newLevel.map { "Lvl \($0)" } ?? "Unlocked"
+                let body = "\(change.name) · \(levelText)\(change.becameMastered ? " · Mastered 👑" : "")"
+                addSpriteActivity(kind: .newSprite, title: "New Sprite added", message: body, change: change)
                 notificationService.send(
                     title: "New Sprite Added",
-                    body: "\(change.name) · \(change.rarity.rawValue) · \(levelText)\(masteryText) · Added to \(profileName)",
-                    identifier: "sprite-new-\(notificationKey(change.name))"
+                    body: body,
+                    identifier: "sprite-new-\(notificationKey(change.name))",
+                    spriteName: change.name
                 )
             }
 
             for change in summary.masteredSprites {
+                addSpriteActivity(kind: .mastered, title: "Sprite mastered 👑", message: "\(change.name) reached Level 5.", change: change)
                 notificationService.send(
                     title: "Sprite Mastered 👑",
                     body: "\(change.name) reached Level 5 in \(profileName).",
-                    identifier: "sprite-mastered-\(notificationKey(change.name))"
+                    identifier: "sprite-mastered-\(notificationKey(change.name))",
+                    spriteName: change.name
                 )
             }
 
             for change in summary.levelUps {
                 let oldLevel = change.previousLevel ?? 0
                 let newLevel = change.newLevel ?? oldLevel
+                addSpriteActivity(kind: .levelUp, title: "Sprite leveled up", message: "\(change.name) · Lvl \(oldLevel) → Lvl \(newLevel)", change: change)
                 notificationService.send(
                     title: "Sprite Level Updated",
                     body: "\(change.name) · Lvl \(oldLevel) → Lvl \(newLevel)",
-                    identifier: "sprite-level-\(notificationKey(change.name))-\(newLevel)"
+                    identifier: "sprite-level-\(notificationKey(change.name))-\(newLevel)",
+                    spriteName: change.name
+                )
+            }
+
+            for change in summary.lostSprites {
+                addSpriteActivity(kind: .lost, title: "Sprite lost in past match", message: "\(change.name) is greyed out in Fortnite but remains in your unlocked collection.", change: change)
+                notificationService.send(
+                    title: "Sprite Lost",
+                    body: "\(change.name) was lost in a past match. It still counts as unlocked.",
+                    identifier: "sprite-lost-\(notificationKey(change.name))",
+                    spriteName: change.name
                 )
             }
         }
 
-        if hotkeyShouldFinishAfterApply {
-            hotkeyShouldFinishAfterApply = false
-            Task { [weak self] in
-                await self?.finishHotkeyScanSession()
-            }
+        if shouldFinishAfterApply {
+            shouldFinishAfterApply = false
+            Task { [weak self] in await self?.finishHotkeyScanSession(completed: true) }
         }
     }
+
+    var shortcutText: String { "⌃⌥S" }
 
     var selectedWindow: CaptureWindowInfo? {
         guard let selectedWindowID else { return nil }
         return windows.first(where: { $0.id == selectedWindowID })
     }
 
-    var shortcutText: String {
-        "⌃⌥S"
+    var selectedApplication: CaptureApplicationInfo? {
+        guard let selectedApplicationID else { return nil }
+        return applications.first(where: { $0.id == selectedApplicationID })
     }
+
+    var selectedCaptureDevice: CaptureDeviceInfo? {
+        guard let selectedCaptureDeviceID else { return nil }
+        return captureDevices.first(where: { $0.id == selectedCaptureDeviceID })
+    }
+
+    var selectedSourceDisplayName: String {
+        switch sourceMode {
+        case .application:
+            return selectedApplication?.displayName ?? "No application selected"
+        case .window:
+            return selectedWindow?.displayName ?? "No window selected"
+        case .captureDevice:
+            return selectedCaptureDevice?.name ?? "No capture device selected"
+        }
+    }
+
+    var targetCollectionCount: Int { targetProfile?.ownedCount ?? 0 }
+    var totalSpriteCount: Int { SpriteCatalog.all.count }
+    var changesSoFar: Int { sessionNewCount + sessionLevelUpCount + sessionMasteredCount + sessionLostCount }
+
+    var elapsedText: String {
+        let minutes = sessionElapsedSeconds / 60
+        let seconds = sessionElapsedSeconds % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    var menuBarSymbol: String {
+        switch scanPhase {
+        case .idle: return "sparkles"
+        case .waitingForSource, .waitingForCollection: return "scope"
+        case .waitingForStability: return "pause.circle.fill"
+        case .scanning: return "dot.radiowaves.left.and.right"
+        case .complete: return "checkmark.circle.fill"
+        case .error: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var liveButtonSummary: String {
+        guard isHotkeyScanning else { return "Live Capture" }
+        return "\(scanPhase.label.uppercased()) · \(elapsedText) · \(targetCollectionCount)/\(totalSpriteCount) · +\(changesSoFar)"
+    }
+
+    var coverageText: String { "\(scanCoverageCount)/\(totalSpriteCount)" }
+    var collectionText: String { "\(targetCollectionCount)/\(totalSpriteCount)" }
 
     private var targetProfile: CollectionProfile? {
         guard let targetProfileID else { return store?.selectedProfile }
         return store?.profile(withID: targetProfileID)
     }
 
-    private func receive(
-        _ detections: [DetectedSprite],
-        requiresLiveConfirmation: Bool
-    ) {
+    private var sourceReadyDescription: String {
+        switch sourceMode {
+        case .application:
+            if let app = selectedApplication {
+                if let target = resolvedApplicationTarget {
+                    return "Ready: \(app.applicationName) → \(target.windowTitle.isEmpty ? "largest gameplay window" : target.windowTitle)."
+                }
+                return "\(app.applicationName) is selected. Waiting for a shareable window."
+            }
+            return "Choose the app that contains Fortnite."
+        case .window:
+            return selectedWindow.map { "Ready to read \($0.displayName)." } ?? "Choose a specific window."
+        case .captureDevice:
+            return selectedCaptureDevice.map { "Ready to read \($0.name) directly." } ?? "Choose a USB/video capture device."
+        }
+    }
+
+    private func ensureSourceReady() async -> Bool {
+        switch sourceMode {
+        case .application:
+            guard selectedApplicationID != nil else {
+                await failToStart("Choose an application in Live Capture first.")
+                return false
+            }
+            guard screenRecordingGranted || CGPreflightScreenCaptureAccess() else {
+                await failToStart("Screen Recording permission is required for application capture.")
+                return false
+            }
+            guard (try? await resolveWindowForCurrentSource()) != nil else {
+                await failToStart("The selected application has no shareable window right now.")
+                return false
+            }
+        case .window:
+            guard selectedWindowID != nil else {
+                await failToStart("Choose a specific window in Live Capture first.")
+                return false
+            }
+            guard screenRecordingGranted || CGPreflightScreenCaptureAccess() else {
+                await failToStart("Screen Recording permission is required for window capture.")
+                return false
+            }
+        case .captureDevice:
+            guard selectedCaptureDeviceID != nil else {
+                await failToStart("Choose a capture device in Live Capture first.")
+                return false
+            }
+            if !captureDeviceService.authorizationGranted {
+                captureDeviceGranted = await captureDeviceService.requestAuthorization()
+            }
+            guard captureDeviceGranted else {
+                await failToStart("Camera access is required to read the selected capture device.")
+                return false
+            }
+        }
+        return true
+    }
+
+    private func resolveWindowForCurrentSource() async throws -> ResolvedCaptureTarget? {
+        guard sourceMode == .application, let selectedApplicationID else { return nil }
+        let target = try await captureService.resolvedWindow(for: selectedApplicationID)
+        resolvedApplicationTarget = target
+        return target
+    }
+
+    private func receive(_ analysis: SpriteFrameAnalysis) {
         lastScanDate = .now
-        guard !detections.isEmpty else {
-            pendingLiveSignature = ""
-            pendingLiveConfirmations = 0
-            statusText = isStreaming
-                ? "No readable owned Sprite cards in this frame; continuing to watch…"
-                : "No readable owned Sprite cards were found."
+        isCollectionScreenDetected = analysis.isCollectionScreen
+
+        guard analysis.isCollectionScreen else {
+            scanPhase = .waitingForCollection
+            statusText = "Capture is active — waiting for Fortnite Sprites → Collection."
             return
         }
 
-        let signature = detections
+        if let pageStart = analysis.inferredPageStart {
+            let end = min(pageStart + max(analysis.visibleSlots, 1) - 1, totalSpriteCount - 1)
+            if pageStart <= end {
+                for index in pageStart...end { coveredCatalogIndexes.insert(index) }
+            }
+            scanCoverageCount = coveredCatalogIndexes.count
+        }
+
+        sessionSeenNames.formUnion(analysis.detections.map(\.name))
+        sessionObservedSpriteCount = sessionSeenNames.count
+
+        if analysis.detections.isEmpty {
+            scanPhase = .scanning
+            statusText = "Collection detected. This view has no readable unlocked cards yet; waiting for the next stable view…"
+            checkForAutomaticCompletion(afterApplying: false)
+            return
+        }
+
+        let signature = analysis.detections
             .sorted { $0.name < $1.name }
-            .map { "\($0.name.lowercased())=\($0.level)" }
-            .joined(separator: "|")
+            .map { "\($0.name.lowercased())=\($0.status.rawValue)=\($0.level.map(String.init) ?? "?")" }
+            .joined(separator: "|") + "@\(analysis.inferredPageStart ?? -1)"
 
-        guard signature != lastDetectionSignature else {
-            statusText = isStreaming
-                ? "Same \(detections.count) visible Sprite cards; waiting for the collection grid to change…"
-                : "Captured \(detections.count) Sprite cards; no tracking changes were needed."
-            return
+        let isNewDetectionPage = signature != lastDetectionSignature
+        if isNewDetectionPage {
+            lastDetectionSignature = signature
+            latestDetections = analysis.detections
+            resultRevision = UUID()
         }
 
-        if requiresLiveConfirmation {
-            if pendingLiveSignature == signature {
-                pendingLiveConfirmations += 1
-            } else {
-                pendingLiveSignature = signature
-                pendingLiveConfirmations = 1
-            }
+        scanPhase = .scanning
+        statusText = "Scanning · collection \(targetCollectionCount)/\(totalSpriteCount) · coverage \(scanCoverageCount)/\(totalSpriteCount) · \(changesSoFar) changes."
+        checkForAutomaticCompletion(afterApplying: isNewDetectionPage)
+    }
 
-            guard pendingLiveConfirmations >= 2 else {
-                statusText = "Potential \(detections.count)-card page found; confirming it on the next frame…"
-                return
-            }
-        }
-
-        pendingLiveSignature = ""
-        pendingLiveConfirmations = 0
-        lastDetectionSignature = signature
-        latestDetections = detections
-
-        if isHotkeyScanning {
-            hotkeySeenNames.formUnion(detections.map(\.name))
-            updateHotkeyCoverage(from: detections)
-        }
-
-        resultRevision = UUID()
-
-        if isHotkeyScanning {
-            let coverage = Int(hotkeyCoverageRatio * 100)
-            statusText = "Hotkey scan · \(hotkeySeenNames.count) owned Sprites read · \(hotkeyPagesScanned) grid positions · ~\(coverage)% catalog coverage."
+    private func checkForAutomaticCompletion(afterApplying: Bool) {
+        guard isHotkeyScanning, scanCoverageCount >= totalSpriteCount else { return }
+        if afterApplying {
+            shouldFinishAfterApply = true
         } else {
-            statusText = "Confirmed \(detections.count) visible Sprite card\(detections.count == 1 ? "" : "s") and merged the result."
+            Task { [weak self] in await self?.finishHotkeyScanSession(completed: true) }
         }
     }
 
-    private func updateHotkeyCoverage(from detections: [DetectedSprite]) {
-        guard let pageStart = inferredPageStart(from: detections) else { return }
-
-        hotkeyPageStarts.insert(pageStart)
-        hotkeyPagesScanned = hotkeyPageStarts.count
-
-        let lastIndex = SpriteCatalog.all.count - 1
-        guard lastIndex >= 0 else { return }
-        let pageEnd = min(pageStart + 11, lastIndex)
-        if pageStart <= pageEnd {
-            for index in pageStart...pageEnd {
-                hotkeyCoveredCatalogIndexes.insert(index)
-            }
-        }
-
-        let lastPossibleStart = max(SpriteCatalog.all.count - 12, 0)
-        if pageStart >= lastPossibleStart {
-            hotkeyReachedCatalogEnd = true
-        }
-
-        // Reaching the last page alone is not enough: a player can jump straight
-        // to the bottom and skip most of the list. Require broad coverage before
-        // auto-stopping, while allowing several well-spaced pages as a fallback
-        // when a sparse collection leaves some pages with no readable owned card.
-        if hotkeyReachedCatalogEnd,
-           hotkeyCoverageRatio >= 0.72 || hotkeyPageStarts.count >= 7 {
-            hotkeyShouldFinishAfterApply = true
+    private func receiveCaptureStatus(_ status: String) {
+        statusText = status
+        let lower = status.lowercased()
+        if lower.contains("fast scrolling") || lower.contains("settle") {
+            scanPhase = .waitingForStability
+        } else if lower.contains("stable view") || lower.contains("reading") {
+            scanPhase = .scanning
+        } else if lower.contains("connected") || lower.contains("capture active") {
+            scanPhase = .waitingForCollection
         }
     }
 
-    private var hotkeyCoverageRatio: Double {
-        guard !SpriteCatalog.all.isEmpty else { return 0 }
-        return Double(hotkeyCoveredCatalogIndexes.count) / Double(SpriteCatalog.all.count)
-    }
-
-    private func inferredPageStart(from detections: [DetectedSprite]) -> Int? {
-        let starts = detections.compactMap { detection -> Int? in
-            guard let catalogIndex = detection.catalogIndex,
-                  let gridSlot = detection.gridSlot else { return nil }
-            return catalogIndex - gridSlot
-        }
-
-        guard starts.count >= 2,
-              let first = starts.first,
-              first >= 0,
-              starts.allSatisfy({ $0 == first }) else {
-            return nil
-        }
-        return first
-    }
-
-    private func finishHotkeyScanSession() async {
+    private func finishHotkeyScanSession(completed: Bool) async {
         guard isHotkeyScanning else { return }
-
-        await captureService.stop()
+        await stopCaptureEngine()
         isStreaming = false
         isHotkeyScanning = false
+        stopSessionTimer()
 
-        let coverage = Int(hotkeyCoverageRatio * 100)
-        let summary = "\(hotkeySeenNames.count) Sprites checked · \(hotkeyNewCount) new · \(hotkeyUpdatedCount) updated · \(hotkeyMasteredCount) mastered"
-        statusText = "Hotkey scan complete. \(summary) · ~\(coverage)% catalog coverage."
-
-        notificationService.send(
-            title: "Sprite Scan Complete ✓",
-            body: "\(summary) · Saved to \(hotkeyProfileName).",
-            identifier: "sprite-scan-complete"
+        let summary = ScanChangeSummary(
+            newSprites: newNames.sorted(),
+            levelUps: levelUpNames.sorted(),
+            mastered: masteredNames.sorted(),
+            lost: lostNames.sorted()
         )
+        lastCompletedSummary = summary
+
+        let core = "\(targetCollectionCount)/\(totalSpriteCount) unlocked · \(sessionNewCount) new · \(sessionLevelUpCount) leveled · \(sessionMasteredCount) mastered"
+        if completed {
+            scanPhase = .complete
+            statusText = "Scan complete · \(core)."
+            activityStore?.add(ActivityEvent(
+                kind: .scanCompleted,
+                title: "Scan complete",
+                message: "\(core) · coverage \(scanCoverageCount)/\(totalSpriteCount)",
+                profileID: targetProfileID,
+                profileName: sessionProfileName,
+                sessionID: currentSessionID,
+                summary: summary
+            ))
+            notificationService.send(
+                title: "Sprite Scan Complete ✓",
+                body: core,
+                identifier: "sprite-scan-complete",
+                openActivityCenter: true
+            )
+        } else {
+            scanPhase = .idle
+            statusText = "Scan stopped · \(core) · coverage \(scanCoverageCount)/\(totalSpriteCount)."
+            activityStore?.add(ActivityEvent(
+                kind: .scanStopped,
+                title: "Scan stopped",
+                message: "\(core) · coverage \(scanCoverageCount)/\(totalSpriteCount)",
+                profileID: targetProfileID,
+                profileName: sessionProfileName,
+                sessionID: currentSessionID,
+                summary: summary
+            ))
+            notificationService.send(
+                title: "Sprite Scan Stopped",
+                body: "Saved what was confirmed so far. \(core)",
+                identifier: "sprite-scan-stopped",
+                openActivityCenter: true
+            )
+        }
+        currentSessionID = nil
     }
 
-    private func resetHotkeySessionState() {
-        hotkeySeenNames.removeAll(keepingCapacity: true)
-        hotkeyPageStarts.removeAll(keepingCapacity: true)
-        hotkeyCoveredCatalogIndexes.removeAll(keepingCapacity: true)
-        hotkeyReachedCatalogEnd = false
-        hotkeyShouldFinishAfterApply = false
-        hotkeyPagesScanned = 0
-        hotkeyNewCount = 0
-        hotkeyUpdatedCount = 0
-        hotkeyMasteredCount = 0
+    private func stopCaptureEngine() async {
+        switch sourceMode {
+        case .application, .window:
+            await captureService.stop()
+        case .captureDevice:
+            await captureDeviceService.stop()
+        }
     }
 
     private func handleStreamError(_ error: Error) {
         errorText = error.localizedDescription
-        statusText = "Live capture stopped because of an error."
+        statusText = "Capture stopped because of an error."
         isStreaming = false
+        scanPhase = .error
+        stopSessionTimer()
 
         if isHotkeyScanning {
             isHotkeyScanning = false
+            activityStore?.add(ActivityEvent(
+                kind: .error,
+                title: "Sprite scan error",
+                message: error.localizedDescription,
+                profileID: targetProfileID,
+                profileName: sessionProfileName,
+                sessionID: currentSessionID
+            ))
             notificationService.send(
                 title: "Sprite Scan Stopped",
-                body: "The live read stopped because of an error: \(error.localizedDescription)",
-                identifier: "sprite-scan-error"
+                body: error.localizedDescription,
+                identifier: "sprite-scan-error",
+                openActivityCenter: true
             )
         }
+    }
+
+    private func addSpriteActivity(
+        kind: ActivityKind,
+        title: String,
+        message: String,
+        change: DetectionCollectionChange
+    ) {
+        activityStore?.add(ActivityEvent(
+            kind: kind,
+            title: title,
+            message: message,
+            profileID: targetProfileID,
+            profileName: sessionProfileName,
+            spriteName: change.name,
+            sessionID: currentSessionID
+        ))
+    }
+
+    private func refreshChangeCounters() {
+        sessionNewCount = newNames.count
+        sessionLevelUpCount = levelUpNames.count
+        sessionMasteredCount = masteredNames.count
+        sessionLostCount = lostNames.count
+    }
+
+    private func resetSessionState() {
+        lastDetectionSignature = ""
+        sessionElapsedSeconds = 0
+        scanCoverageCount = 0
+        sessionObservedSpriteCount = 0
+        sessionNewCount = 0
+        sessionLevelUpCount = 0
+        sessionMasteredCount = 0
+        sessionLostCount = 0
+        isCollectionScreenDetected = false
+        sessionSeenNames.removeAll(keepingCapacity: true)
+        coveredCatalogIndexes.removeAll(keepingCapacity: true)
+        newNames.removeAll(keepingCapacity: true)
+        levelUpNames.removeAll(keepingCapacity: true)
+        masteredNames.removeAll(keepingCapacity: true)
+        lostNames.removeAll(keepingCapacity: true)
+        shouldFinishAfterApply = false
+    }
+
+    private func startSessionTimer() {
+        sessionTimerTask?.cancel()
+        let start = Date()
+        sessionTimerTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self?.sessionElapsedSeconds = max(Int(Date().timeIntervalSince(start)), 0)
+                }
+            }
+        }
+    }
+
+    private func stopSessionTimer() {
+        sessionTimerTask?.cancel()
+        sessionTimerTask = nil
+    }
+
+    private func failToStart(_ message: String) async {
+        errorText = message
+        statusText = message
+        scanPhase = .error
+        notificationService.send(
+            title: "Sprite Scan Couldn't Start",
+            body: message,
+            identifier: "sprite-scan-source-error",
+            openActivityCenter: true
+        )
+    }
+
+    private func persistSourceSelection() {
+        let defaults = UserDefaults.standard
+        defaults.set(sourceMode.rawValue, forKey: DefaultsKey.mode)
+        defaults.set(selectedApplicationID, forKey: DefaultsKey.application)
+        if let selectedWindowID {
+            defaults.set(NSNumber(value: selectedWindowID), forKey: DefaultsKey.window)
+        } else {
+            defaults.removeObject(forKey: DefaultsKey.window)
+        }
+        defaults.set(selectedCaptureDeviceID, forKey: DefaultsKey.device)
     }
 
     private func notificationKey(_ value: String) -> String {
@@ -526,5 +878,16 @@ final class LiveCaptureManager: ObservableObject {
             .lowercased()
             .replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+}
+
+private enum LiveCaptureError: LocalizedError {
+    case sourceUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .sourceUnavailable:
+            return "The selected capture source is not currently available."
+        }
     }
 }

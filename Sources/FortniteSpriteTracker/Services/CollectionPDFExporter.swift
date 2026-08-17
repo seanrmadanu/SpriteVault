@@ -74,17 +74,7 @@ enum CollectionPDFExporter {
     }
 
     private static func resourceURL(named assetName: String) -> URL? {
-        Bundle.module.url(forResource: assetName, withExtension: "png")
-            ?? Bundle.module.url(
-                forResource: assetName,
-                withExtension: "png",
-                subdirectory: "SpriteImages"
-            )
-            ?? Bundle.module.url(
-                forResource: assetName,
-                withExtension: "png",
-                subdirectory: "Resources/SpriteImages"
-            )
+        ResourceLocator.spriteImageURL(named: assetName)
     }
 
     private static func safeFilename(_ value: String) -> String {

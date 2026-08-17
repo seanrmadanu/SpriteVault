@@ -1,20 +1,26 @@
 import Foundation
 import UserNotifications
+import AppKit
 
-/// Notification delivery that works both when the project is launched as a
-/// normal .app bundle and when Xcode runs this repository as a Swift Package
-/// executable.
-///
-/// UNUserNotificationCenter.current() requires a real application bundle on
-/// macOS. Calling it from SwiftPM's bare executable can raise an Objective-C
-/// exception before Swift gets a chance to catch it. We therefore only touch
-/// UNUserNotificationCenter when Bundle.main is a real .app. During SwiftPM
-/// development runs we fall back to macOS's `osascript display notification`
-/// command so scan notifications still work without crashing the tracker.
-final class AppNotificationService: NSObject, UNUserNotificationCenterDelegate {
+extension Notification.Name {
+    static let spriteNotificationSelected = Notification.Name("SpriteVault.SpriteNotificationSelected")
+    static let activityNotificationSelected = Notification.Name("SpriteVault.ActivityNotificationSelected")
+    static let spriteVaultOpenMainWindow = Notification.Name("SpriteVault.OpenMainWindow")
+}
+
+/// Native notifications for the real macOS app, with a safe AppleScript fallback
+/// when somebody still launches the repository as a bare Swift Package target.
+final class AppNotificationService: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     static let shared = AppNotificationService()
 
+    enum PendingDestination: Sendable {
+        case sprite(String)
+        case activity
+    }
+
     private let center: UNUserNotificationCenter?
+    private let routeLock = NSLock()
+    private var pendingDestination: PendingDestination?
     private let usesNativeNotificationCenter: Bool
 
     private override init() {
@@ -24,53 +30,43 @@ final class AppNotificationService: NSObject, UNUserNotificationCenterDelegate {
             mainBundle.bundleIdentifier != nil
 
         usesNativeNotificationCenter = isApplicationBundle
-
-        // IMPORTANT: Do not call UNUserNotificationCenter.current() at all for
-        // a Swift Package executable. On macOS that call can throw the
-        // "bundleProxyForCurrentProcess is nil" Objective-C exception shown in
-        // Xcode, which cannot be handled with Swift's do/catch.
-        if isApplicationBundle {
-            center = UNUserNotificationCenter.current()
-        } else {
-            center = nil
-        }
-
+        center = isApplicationBundle ? UNUserNotificationCenter.current() : nil
         super.init()
         center?.delegate = self
     }
 
-    /// True when the process is running as a real macOS application bundle and
-    /// can use UserNotifications directly.
-    var isUsingNativeNotifications: Bool {
-        usesNativeNotificationCenter
+    var isUsingNativeNotifications: Bool { usesNativeNotificationCenter }
+
+    func consumePendingDestination() -> PendingDestination? {
+        routeLock.lock()
+        defer { routeLock.unlock() }
+        let destination = pendingDestination
+        pendingDestination = nil
+        return destination
+    }
+
+    private func rememberPendingDestination(_ destination: PendingDestination) {
+        routeLock.lock()
+        pendingDestination = destination
+        routeLock.unlock()
     }
 
     func authorizationGranted() async -> Bool {
-        guard let center else {
-            // SwiftPM development mode uses the AppleScript fallback. There is
-            // no UNUserNotificationCenter permission prompt to query here.
-            return true
-        }
-
+        guard let center else { return true }
         return await withCheckedContinuation { continuation in
             center.getNotificationSettings { settings in
-                continuation.resume(
-                    returning: settings.authorizationStatus == .authorized ||
-                        settings.authorizationStatus == .provisional
+                continuation.resume(returning:
+                    settings.authorizationStatus == .authorized ||
+                    settings.authorizationStatus == .provisional
                 )
             }
         }
     }
 
     func requestAuthorization() async -> Bool {
-        guard let center else {
-            // The fallback does not use UNUserNotificationCenter, so requesting
-            // its authorization would just recreate the SwiftPM launch crash.
-            return true
-        }
-
+        guard let center else { return true }
         do {
-            return try await center.requestAuthorization(options: [.alert, .sound])
+            return try await center.requestAuthorization(options: [.alert, .sound, .badge])
         } catch {
             return false
         }
@@ -80,21 +76,21 @@ final class AppNotificationService: NSObject, UNUserNotificationCenterDelegate {
         title: String,
         body: String,
         sound: UNNotificationSound? = .default,
-        identifier: String = UUID().uuidString
+        identifier: String = UUID().uuidString,
+        spriteName: String? = nil,
+        openActivityCenter: Bool = false
     ) {
         if let center {
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = body
             content.sound = sound
+            var userInfo: [String: String] = [:]
+            if let spriteName { userInfo["spriteName"] = spriteName }
+            if openActivityCenter { userInfo["openActivityCenter"] = "true" }
+            content.userInfo = userInfo
 
-            let request = UNNotificationRequest(
-                identifier: identifier,
-                content: content,
-                trigger: nil
-            )
-
-            center.add(request) { error in
+            center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) { error in
                 if let error {
                     print("Notification delivery failed: \(error.localizedDescription)")
                 }
@@ -109,16 +105,43 @@ final class AppNotificationService: NSObject, UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        [.banner, .sound, .list]
     }
 
-    /// Fallback used only when Xcode launches the Swift Package executable
-    /// directly instead of launching a .app bundle.
-    private func sendDevelopmentNotification(
-        title: String,
-        body: String,
-        playSound: Bool
-    ) {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let info = response.notification.request.content.userInfo
+        let spriteName = info["spriteName"] as? String
+        let openActivity = (info["openActivityCenter"] as? String) == "true"
+
+        if let spriteName {
+            rememberPendingDestination(.sprite(spriteName))
+        } else if openActivity {
+            rememberPendingDestination(.activity)
+        }
+
+        await MainActor.run {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            NSApplication.shared.windows.first(where: \.canBecomeKey)?.makeKeyAndOrderFront(nil)
+            NotificationCenter.default.post(name: .spriteVaultOpenMainWindow, object: nil)
+
+            // Post immediately for a running UI. The pending route remains as a
+            // cold-launch fallback and is consumed by ContentView on appearance.
+            if let spriteName {
+                NotificationCenter.default.post(
+                    name: .spriteNotificationSelected,
+                    object: nil,
+                    userInfo: ["spriteName": spriteName]
+                )
+            } else if openActivity {
+                NotificationCenter.default.post(name: .activityNotificationSelected, object: nil)
+            }
+        }
+    }
+
+    private func sendDevelopmentNotification(title: String, body: String, playSound: Bool) {
         let safeTitle = escapeForAppleScript(title)
         let safeBody = escapeForAppleScript(body)
         let soundClause = playSound ? " sound name \"Glass\"" : ""
@@ -127,12 +150,8 @@ final class AppNotificationService: NSObject, UNUserNotificationCenterDelegate {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         process.arguments = ["-e", script]
-
-        do {
-            try process.run()
-        } catch {
-            print("Development notification fallback failed: \(error.localizedDescription)")
-        }
+        do { try process.run() }
+        catch { print("Development notification fallback failed: \(error.localizedDescription)") }
     }
 
     private func escapeForAppleScript(_ value: String) -> String {

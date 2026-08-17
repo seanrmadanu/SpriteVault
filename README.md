@@ -1,90 +1,132 @@
-# Fortnite Sprite Tracker (macOS)
+# Sprite Vault — Fortnite Sprite Tracker for macOS
 
-A native SwiftUI macOS checklist for all 117 Fortnite Sprites in the supplied Fortnite.GG PDF.
+Native SwiftUI macOS app for tracking all 117 Fortnite Sprites, including level, mastery, profiles, comparison, PDF export, imported media analysis, and live capture.
 
-## Features
-- 117 Sprite checklist with the actual Sprite artwork extracted from the supplied PDF
-- Separate **Owned** and **Mastered** states (Mastered = Level 5)
-- Multiple named profiles with completely separate local collection progress
-- Automatic migration of the previous single `sprites.json` collection into **My Collection**
-- Profile-to-profile comparison for shared ownership, unique Sprites, and level differences
-- One-page poster PDF export with family names on the left and Normal/Cube/Gold/Quack/Gummy/Galaxy/Gem/Holofoil columns on the right
-- PDF cells show artwork and level when owned, a crown at Level 5, a lock when unowned, and a dark dashed cell when that variant does not exist
-- Recording/screenshot import includes a target-profile picker, so one import cannot overwrite another profile by accident
-- Video analysis uses Vision OCR on only the selected Sprite's right-side name and level
-- Screenshot analysis scans the 3-column Collection grid, reads each visible owned card's Lvl label, and uses Vision image feature prints to match the card artwork against all 117 built-in Sprite images
-- Screenshot matching compensates for black letterboxing and uses the catalog's Type-order sequence only when it agrees with the artwork matches, reducing variant mix-ups
-- Matches that name to the built-in catalog for its rarity/type
-- Marks a detected Sprite as owned, saves its exact level, and marks it Mastered only when that same Sprite is Level 5
-- Preserves the recording's full text resolution, then crops and enhances only the right-side details panel
-- Supports wrapped/name-only titles, the game's Lootin' Llama naming, and the Sprite Mastered banner
-- Accepts an exact right-panel catalog match immediately; fuzzy OCR still requires matching frames
-- Samples a little over twice per second and lets you review results before applying them
-- Heavy motion/UI polish: animated background, hover tilt, Fortnite-style animated Sprite info panels, spring transitions, progress-ring animation, numeric count transitions, scanline import animation, symbol effects, toast animations, mastered sparkles, animated filter panel, and more
-- Honors macOS Reduce Motion for the animated background
+## Open the correct project
 
-## Open in Xcode
-1. On a Mac with Xcode 16+, open `Package.swift`.
-2. Select the `FortniteSpriteTracker` scheme.
-3. Run on **My Mac**.
+**Open `FortniteSpriteTracker.xcodeproj` in Xcode. Do not open `Package.swift` for normal app testing.**
 
-## Best recording workflow
-In Fortnite, move the selection onto every Sprite card; merely scrolling past a row does not expose every card's name. Keep each selected Sprite's name and level visible in the right-side details panel for roughly one second. The detector ignores the left grid, so a Level 5 label on another card cannot affect the selected Sprite.
+The Xcode project builds a real **Sprite Vault.app** bundle so Screen Recording, capture-device permission, Accessibility, native notifications, notification clicks, and the menu-bar companion have a proper application identity.
 
-## Important limitations
-Recording detection is intentionally based on the right-side selected-Sprite details. A Sprite is not imported unless both its name and level are readable there. Exact catalog matches may be accepted from one frame; typo-tolerant matches require repeated agreement.
+Requirements:
+- macOS 14+
+- Xcode 16+
+- Run destination: **My Mac**
 
-Screenshot detection expects the normal Fortnite Collection view with the visible 3-column card grid. Only cards with a readable `Lvl 1` through `Lvl 5` label are treated as owned. Level 5 is Mastered. A screenshot only imports the cards currently visible, so screenshot files default to **Merge** mode; take additional screenshots after scrolling to cover the rest of a collection. The screenshot importer is designed around the current 16:9 Collection layout; heavily cropped screenshots or a future Fortnite UI redesign may need updated grid coordinates.
+On first use, open **Live Capture** and grant the permissions needed by the capture source you choose.
 
-## Image loading fix
-Sprite PNGs are SwiftPM processed resources. SwiftPM can flatten nested resource directories, so the app now checks the resource bundle root first and then the original SpriteImages paths. If an asset cannot be found, the card displays the exact missing filename instead of a generic placeholder.
+## Capture sources
 
-## Window + search fix
-- Explicitly activates the Swift Package executable as a regular macOS app when Xcode launches it.
-- Configures the SwiftUI window as resizable and full-screen-primary, so the green traffic-light button enters native full screen.
-- Removed the in-app full-screen button.
-- Search uses a native NSSearchField, preserves its live field editor while typing, and explicitly makes the tracker window key when clicked.
+Live Capture now has three source modes:
 
-## Startup performance
-- Visible Sprite artwork is decoded into 320 px thumbnails on a four-operation background queue instead of blocking SwiftUI's main thread.
-- Recently viewed images are cached, so view updates and scrolling do not reopen the same PNG repeatedly.
-- Removed the permanent floating animation from every card and the staggered launch animation.
-- Replaced per-card material/blur effects and nine blurred background circles with cheaper gradients.
-- Progress is no longer rewritten to disk during the initial load; later saves run on a utility queue.
+1. **Application** — choose OBS Studio, PS Remote Play, GeForce NOW, a browser, Chiaki, etc. Sprite Vault examines all shareable windows belonging to that app and automatically prefers gameplay/projector/preview-style windows. A live preview shows exactly what it selected.
+2. **Specific Window** — manual fallback when an app has several windows and you want exact control.
+3. **Capture Device** — reads a USB/UVC video capture device directly through AVFoundation, bypassing OBS entirely.
 
+Imported screenshots and recordings continue to work independently of Live Capture.
 
-## Profiles
-Use the profile menu below the **SPRITE VAULT** title to create, rename, delete, or switch profiles. To scan a friend's collection, create their profile, open the recording importer, and select that profile as the target before applying the reviewed detections. Each profile is stored independently in `profiles.json`. The app preserves an existing pre-profile collection by migrating `sprites.json` into **My Collection** on first launch.
+## Hotkey scan
 
-## PDF export
-Select a profile and choose **Export PDF**. The app creates a single tall poster-style PDF based on the checklist layout: one row per Sprite family and columns for every variant type in the built-in catalog. Owned cells include the Sprite artwork and exact level; Level 5 receives a crown. Unowned existing variants receive a lock, while impossible variants use a dark dashed placeholder.
+Press **Control + Option + S** (`⌃⌥S`) to start a collection scan.
 
-## Compare profiles
-Create at least two profiles, select the first one, and choose **Compare**. The comparison sheet reports both totals, shared ownership, Sprites owned by only one profile, and level or mastery differences.
+- One press starts the session. A second hotkey press does not stop it.
+- The scanner waits until it visually confirms **SPRITES → COLLECTION**.
+- While you scroll quickly, heavy Vision/OCR work pauses instead of repeatedly reading blurry frames.
+- When the grid has been stable for roughly half a second, the current view is analyzed once.
+- Duplicate stable views are ignored.
+- The session auto-finishes only when all 117 catalog positions have been covered. A manual **Stop Scan** control remains available in Live Capture and the menu-bar companion.
 
-## Live ScreenCaptureKit scanning
-Choose **Live Capture** in the main toolbar. The app asks ScreenCaptureKit for shareable on-screen windows, ranks Fortnite/cloud-gaming/capture windows first, and lets you choose exactly which window should be scanned. It does **not** capture the entire desktop.
+Two progress values are kept separate:
+- **Collection x/117** — how many Sprites the selected profile has unlocked.
+- **Scan x/117** — how many catalog positions the current session has confidently covered.
 
-Live mode uses `SCStream` with a desktop-independent window filter, no audio, no cursor, a two-frame queue, and a selectable **2 / 3 / 5 FPS** capture rate. Frames are downscaled to at most 1440 px wide before Vision work. The detector drops incoming frames while a previous Vision pass is still running, so capture cannot queue up an expensive backlog.
+## Left-grid + right-panel recognition
 
-For safety, a live frame is ignored unless Vision can first confirm the **COLLECTION** heading. A changed page must also be detected in two consecutive live frames before it is merged into the target profile. This is intentionally stricter than a manually requested screenshot because a false positive in fully automatic mode would silently corrupt collection data.
+A stable Collection frame is analyzed from both sides:
 
-The Collection grid does not display each Sprite's name, so OCR alone cannot identify every visible card. The app therefore uses Vision OCR for each `Lvl 1`–`Lvl 5` label and Vision image feature prints for the Sprite/variant artwork. Level 5 is still treated as Mastered.
+- **Left grid:** artwork feature matching, `Lvl 1–5`, mastery from Level 5, and visible catalog slots.
+- **Right detail panel:** exact selected Sprite name, rarity, level/mastery text, and `LOST IN PAST MATCH`.
 
-## One-press hotkey collection scan
-After choosing a target window, press **Control + Option + S** (`⌃⌥S`) from anywhere. The shortcut now starts a scan session rather than taking a single screenshot. Keep the Fortnite Collection sorted by **Type** and scroll through the list. Each changed page must still be confirmed twice before it is merged, duplicate pages are ignored, and the app tracks inferred catalog coverage from the visible 3x4 grid.
+The right panel is treated as stronger evidence for the selected card and can correct an uncertain visual artwork match.
 
-When the scanner reaches the final Type-sorted catalog region and has covered most of the collection, it stops ScreenCaptureKit automatically. The hotkey does not need to be pressed a second time. The Live Capture sheet shows scan state and exposes a button to start the same session for testing.
+## Locked, collected, and lost Sprites
 
-macOS notifications can be enabled in the Live Capture sheet. A hotkey session posts a start alert, a completion summary, and—after the profile already has an existing collection—alerts for newly added Sprites, level increases, and newly mastered Sprites. Empty profiles are treated as an initial sync, so they receive one completion summary instead of dozens of individual "new Sprite" notifications.
+Sprite Vault stores three states:
 
-The shortcut uses `NSEvent` global/local monitors. macOS requires **Accessibility** permission for key events observed while another app is focused. Window capture requires **Screen Recording** permission. Both permissions can be requested from the Live Capture sheet. Depending on macOS/TCC state, Screen Recording changes can require relaunching the app.
+- **Locked** — never unlocked; Fortnite shows only the silhouette/no useful details.
+- **Collected** — unlocked and currently available.
+- **Lost** — greyed out / `LOST IN PAST MATCH`; it still counts toward the player's unlocked collection.
 
-## Hover Sprite intel
-Hovering a Sprite card briefly opens an animated angular info panel inspired by Fortnite's UI. It shows the Sprite name, rarity, gameplay ability summary, known variant perk, ownership, level, and mastery state. Variant cards inherit the underlying base Sprite ability.
+A lost Sprite is never automatically changed back to Locked just because it is greyed out in Fortnite.
 
-If you turn this Swift package into a signed/distributed `.app`, add an `NSScreenCaptureUsageDescription` string to the app target's Info settings explaining that Sprite Vault reads the selected Fortnite/streaming window to detect collection progress.
+## Notifications and Activity
 
-## Notification behavior when running from Xcode
+Native macOS alerts are available for:
+- scan started
+- scan completed / stopped
+- new Sprite
+- level increase
+- mastery
+- lost Sprite
+- capture errors
 
-This repository is currently a Swift Package executable rather than a bundled macOS app target. `UNUserNotificationCenter.current()` can crash a bare SwiftPM executable on macOS because there is no application bundle proxy. The notification service therefore uses native UserNotifications when launched from a real `.app` bundle and a local `osascript` notification fallback during SwiftPM/Xcode development runs.
+Clicking a recent Sprite notification opens Sprite Vault and navigates to that Sprite card. Completion alerts open the in-app **Activity Center**.
+
+Activity is stored locally by scan session and includes clickable lists of new, leveled, mastered, and lost Sprites. Initial syncs use one summary instead of sending dozens of individual alerts.
+
+## Menu-bar companion
+
+Sprite Vault stays available from the macOS menu bar even if the main window is closed. The menu-bar panel shows:
+
+- scan state and elapsed time
+- selected source
+- live preview
+- whether the Fortnite Collection was confirmed
+- Collection x/117
+- Scan x/117
+- change count
+- Start/Stop Scan
+- Open Sprite Vault
+- Activity unread count
+
+While scanning, the menu-bar label also displays scan coverage.
+
+## Main-window scan status
+
+The **Live Capture** toolbar button becomes a live status capsule while a hotkey scan is active. It cycles through:
+
+- current state
+- elapsed time
+- Collection x/117
+- Scan x/117
+- changes so far
+
+## Sprite card hover
+
+The old detached hover tooltip has been removed. Hovering now makes the Sprite card itself rise and expand above the grid with a Fortnite-inspired spring/light-sweep animation. The expanded card shows the gameplay description, variant perk when known, ownership/lost state, level, and mastery directly under the Sprite name.
+
+## Profiles, search, filters, compare, and PDF
+
+- Multiple independent collection profiles
+- Native search
+- Owned / not-owned / mastered / rarity filters
+- Profile comparison
+- Poster-style PDF export
+- Automatic migration of older single-profile save data
+
+Profile data is stored locally under Application Support in the `FortniteSpriteTracker` folder.
+
+## Permissions
+
+Depending on the selected source, Sprite Vault may request:
+
+- **Screen Recording** — Application / Specific Window modes
+- **Camera** — direct USB capture-device mode
+- **Accessibility** — global `⌃⌥S` shortcut while another app is focused
+- **Notifications** — scan and collection-change alerts
+
+The Xcode app target includes the required usage strings and camera entitlement.
+
+## Development note
+
+`Package.swift` remains in the repository as a fallback/source-layout convenience, but normal testing should use the included `.xcodeproj` app target. The source has been syntax-parsed in the provided build environment; ScreenCaptureKit, AVFoundation device capture, UserNotifications, and SwiftUI/AppKit runtime behavior still need to be exercised on macOS in Xcode.

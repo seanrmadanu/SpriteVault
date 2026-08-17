@@ -18,7 +18,8 @@ final class MacApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        // Keep the menu-bar companion alive when the main Sprite Vault window is closed.
+        false
     }
 }
 
