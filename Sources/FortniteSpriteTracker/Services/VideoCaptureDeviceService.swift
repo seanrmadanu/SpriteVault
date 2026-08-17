@@ -90,7 +90,7 @@ final class VideoCaptureDeviceService: NSObject, AVCaptureVideoDataOutputSampleB
         self.onError = onError
         self.minimumAnalysisInterval = max(0.50, 1.0 / Double(min(max(fps, 2), 5)))
 
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sessionQueue.async { [weak self] in
                 guard let self else {
                     continuation.resume(throwing: CaptureDeviceError.deviceUnavailable)

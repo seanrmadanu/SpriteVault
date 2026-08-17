@@ -69,8 +69,8 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
             .map { app in
                 let appWindows = windowsByPID[app.processID] ?? []
                 let bundleID = app.bundleIdentifier
-                let identifier = bundleID ?? "pid:\(app.processID)"
-                let haystack = "\(app.applicationName) \(bundleID ?? "")".lowercased()
+                let identifier = bundleID.isEmpty ? "pid:\(app.processID)" : bundleID
+                let haystack = "\(app.applicationName) \(bundleID)".lowercased()
                 return CaptureApplicationInfo(
                     id: identifier,
                     applicationName: app.applicationName,
@@ -102,7 +102,8 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
                   app.processID != ownPID,
                   window.frame.width >= 320,
                   window.frame.height >= 180 else { return false }
-            let id = app.bundleIdentifier ?? "pid:\(app.processID)"
+            let bundleID = app.bundleIdentifier
+            let id = bundleID.isEmpty ? "pid:\(app.processID)" : bundleID
             return id == applicationID
         }
 
