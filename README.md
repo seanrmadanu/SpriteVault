@@ -84,3 +84,7 @@ The shortcut uses `NSEvent` global/local monitors. macOS requires **Accessibilit
 Hovering a Sprite card briefly opens an animated angular info panel inspired by Fortnite's UI. It shows the Sprite name, rarity, gameplay ability summary, known variant perk, ownership, level, and mastery state. Variant cards inherit the underlying base Sprite ability.
 
 If you turn this Swift package into a signed/distributed `.app`, add an `NSScreenCaptureUsageDescription` string to the app target's Info settings explaining that Sprite Vault reads the selected Fortnite/streaming window to detect collection progress.
+
+## Notification behavior when running from Xcode
+
+This repository is currently a Swift Package executable rather than a bundled macOS app target. `UNUserNotificationCenter.current()` can crash a bare SwiftPM executable on macOS because there is no application bundle proxy. The notification service therefore uses native UserNotifications when launched from a real `.app` bundle and a local `osascript` notification fallback during SwiftPM/Xcode development runs.
