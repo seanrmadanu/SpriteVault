@@ -178,7 +178,11 @@ final class SpriteStore: ObservableObject {
         recentEvent = event
     }
 
-    func applyDetections(_ detections: [DetectedSprite], replacingExisting: Bool) {
+    @discardableResult
+    func applyDetections(
+        _ detections: [DetectedSprite],
+        replacingExisting: Bool
+    ) -> DetectionApplySummary {
         applyDetections(
             detections,
             to: selectedProfileID,
@@ -186,11 +190,14 @@ final class SpriteStore: ObservableObject {
         )
     }
 
+    @discardableResult
     func applyDetections(
         _ detections: [DetectedSprite],
         to profileID: UUID,
         replacingExisting: Bool
-    ) {
+    ) -> DetectionApplySummary {
+        var changes: [DetectionCollectionChange] = []
+
         mutateProfile(profileID) { profile in
             if replacingExisting {
                 for index in profile.sprites.indices {
@@ -205,12 +212,37 @@ final class SpriteStore: ObservableObject {
                     normalized($0.name) == normalized(detection.name)
                 }) else { continue }
 
+                let before = profile.sprites[index]
                 profile.sprites[index].owned = detection.owned
                 profile.sprites[index].level = detection.level
                 profile.sprites[index].mastered = detection.level == 5
+                let after = profile.sprites[index]
+
+                guard before.owned != after.owned
+                        || before.level != after.level
+                        || before.mastered != after.mastered else {
+                    continue
+                }
+
+                changes.append(
+                    DetectionCollectionChange(
+                        name: after.name,
+                        rarity: after.rarity,
+                        previousOwned: before.owned,
+                        previousLevel: before.level,
+                        newOwned: after.owned,
+                        newLevel: after.level,
+                        becameMastered: !before.mastered && after.mastered
+                    )
+                )
             }
         }
         recentEvent = nil
+
+        return DetectionApplySummary(
+            scannedNames: detections.map(\.name),
+            changes: changes
+        )
     }
 
     func setOwnedFilter(_ enabled: Bool) {
@@ -388,6 +420,49 @@ private struct ProfileArchive: Codable {
     let version: Int
     let selectedProfileID: UUID
     let profiles: [CollectionProfile]
+}
+
+
+
+struct DetectionCollectionChange: Sendable, Equatable {
+    let name: String
+    let rarity: SpriteRarity
+    let previousOwned: Bool
+    let previousLevel: Int?
+    let newOwned: Bool
+    let newLevel: Int?
+    let becameMastered: Bool
+
+    var isNewSprite: Bool {
+        !previousOwned && newOwned
+    }
+
+    var isLevelUp: Bool {
+        guard previousOwned,
+              let newLevel else { return false }
+        return newLevel > (previousLevel ?? 0)
+    }
+}
+
+struct DetectionApplySummary: Sendable, Equatable {
+    let scannedNames: [String]
+    let changes: [DetectionCollectionChange]
+
+    var newSprites: [DetectionCollectionChange] {
+        changes.filter(\.isNewSprite)
+    }
+
+    var masteredSprites: [DetectionCollectionChange] {
+        changes.filter { $0.becameMastered && !$0.isNewSprite }
+    }
+
+    var levelUps: [DetectionCollectionChange] {
+        changes.filter { $0.isLevelUp && !$0.becameMastered && !$0.isNewSprite }
+    }
+
+    var updatedExistingCount: Int {
+        changes.filter { !$0.isNewSprite }.count
+    }
 }
 
 struct SpriteEvent: Equatable {

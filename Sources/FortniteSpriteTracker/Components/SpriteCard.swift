@@ -8,6 +8,8 @@ struct SpriteCard: View {
 
     @State private var hovered = false
     @State private var burst = false
+    @State private var showHoverInfo = false
+    @State private var hoverTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -89,11 +91,53 @@ struct SpriteCard: View {
                     .symbolEffect(.variableColor.iterative, isActive: burst)
             }
         }
+        .overlay(alignment: .top) {
+            if showHoverInfo {
+                FortniteSpriteHoverInfo(item: item)
+                    .frame(width: 270)
+                    .offset(y: 7)
+                    .allowsHitTesting(false)
+                    .transition(
+                        .asymmetric(
+                            insertion: .move(edge: .bottom)
+                                .combined(with: .scale(scale: 0.88, anchor: .bottom))
+                                .combined(with: .opacity),
+                            removal: .scale(scale: 0.94, anchor: .bottom)
+                                .combined(with: .opacity)
+                        )
+                    )
+            }
+        }
+        .zIndex(showHoverInfo ? 50 : 0)
         .scaleEffect(hovered ? 1.025 : 1)
         .rotation3DEffect(.degrees(hovered ? 1.8 : 0), axis: (x: -0.6, y: 1, z: 0))
         .shadow(color: .black.opacity(hovered ? 0.32 : 0.17), radius: hovered ? 16 : 6, y: hovered ? 9 : 4)
         .onHover { inside in
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) { hovered = inside }
+            hoverTask?.cancel()
+
+            if inside {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) {
+                    hovered = true
+                }
+
+                hoverTask = Task {
+                    try? await Task.sleep(for: .milliseconds(160))
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.74)) {
+                            showHoverInfo = true
+                        }
+                    }
+                }
+            } else {
+                withAnimation(.easeOut(duration: 0.14)) {
+                    hovered = false
+                    showHoverInfo = false
+                }
+            }
+        }
+        .onDisappear {
+            hoverTask?.cancel()
         }
     }
 
@@ -233,5 +277,153 @@ struct SpriteCard: View {
         }
 
         return LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+}
+
+
+private struct FortniteSpriteHoverInfo: View {
+    let item: SpriteItem
+    @State private var sweep = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label("SPRITE INTEL", systemImage: "scope")
+                    .font(.system(size: 9, weight: .black, design: .rounded))
+                    .tracking(1.2)
+                    .foregroundStyle(.yellow)
+
+                Spacer()
+
+                Text(item.rarity.rawValue)
+                    .font(.system(size: 9, weight: .black, design: .rounded))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(.yellow.opacity(0.92), in: Capsule())
+                    .foregroundStyle(.black)
+            }
+
+            Text(item.name.uppercased())
+                .font(.system(size: 17, weight: .black, design: .rounded))
+                .italic()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+
+            Text(item.gameplayDescription)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.88))
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let variantBonus = item.variantBonusDescription {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "sparkles")
+                        .foregroundStyle(.yellow)
+                    Text(variantBonus)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.yellow.opacity(0.92))
+                }
+            }
+
+            HStack(spacing: 7) {
+                hoverChip(
+                    item.owned ? "OWNED" : "LOCKED",
+                    symbol: item.owned ? "checkmark.circle.fill" : "lock.fill"
+                )
+
+                if let level = item.level {
+                    hoverChip("LVL \(level)", symbol: "bolt.fill")
+                }
+
+                if item.mastered {
+                    hoverChip("MASTERED", symbol: "crown.fill", highlighted: true)
+                }
+            }
+        }
+        .padding(.horizontal, 15)
+        .padding(.vertical, 13)
+        .background {
+            FortniteInfoShape()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.045, green: 0.055, blue: 0.12),
+                            Color(red: 0.11, green: 0.07, blue: 0.20)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay {
+                    FortniteInfoShape()
+                        .stroke(.yellow.opacity(0.72), lineWidth: 1.2)
+                }
+        }
+        .overlay(alignment: .topLeading) {
+            Rectangle()
+                .fill(.yellow)
+                .frame(width: 112, height: 4)
+                .offset(x: 16, y: 1)
+        }
+        .overlay {
+            GeometryReader { geometry in
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [.clear, .white.opacity(0.13), .clear],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: 48, height: geometry.size.height * 1.6)
+                    .rotationEffect(.degrees(16))
+                    .offset(
+                        x: sweep ? geometry.size.width + 40 : -80,
+                        y: -geometry.size.height * 0.25
+                    )
+            }
+            .clipShape(FortniteInfoShape())
+            .allowsHitTesting(false)
+        }
+        .shadow(color: .black.opacity(0.58), radius: 22, y: 12)
+        .shadow(color: .yellow.opacity(0.12), radius: 12)
+        .onAppear {
+            sweep = false
+            withAnimation(.easeOut(duration: 0.62)) {
+                sweep = true
+            }
+        }
+    }
+
+    private func hoverChip(
+        _ title: String,
+        symbol: String,
+        highlighted: Bool = false
+    ) -> some View {
+        Label(title, systemImage: symbol)
+            .font(.system(size: 8, weight: .black, design: .rounded))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(
+                highlighted ? Color.yellow.opacity(0.9) : Color.white.opacity(0.10),
+                in: Capsule()
+            )
+            .foregroundStyle(highlighted ? Color.black : Color.white.opacity(0.9))
+    }
+}
+
+private struct FortniteInfoShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let cut: CGFloat = 13
+        var path = Path()
+        path.move(to: CGPoint(x: 0, y: cut))
+        path.addLine(to: CGPoint(x: cut, y: 0))
+        path.addLine(to: CGPoint(x: rect.maxX - cut * 1.5, y: 0))
+        path.addLine(to: CGPoint(x: rect.maxX, y: cut))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - cut))
+        path.addLine(to: CGPoint(x: rect.maxX - cut, y: rect.maxY))
+        path.addLine(to: CGPoint(x: cut * 1.5, y: rect.maxY))
+        path.addLine(to: CGPoint(x: 0, y: rect.maxY - cut))
+        path.closeSubpath()
+        return path
     }
 }

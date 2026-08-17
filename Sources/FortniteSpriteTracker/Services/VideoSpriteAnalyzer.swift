@@ -13,6 +13,8 @@ struct DetectedSprite: Identifiable, Hashable, Sendable {
     let mastered: Bool
     let timestamp: Double
     let observations: Int
+    var catalogIndex: Int? = nil
+    var gridSlot: Int? = nil
 }
 
 actor VideoSpriteAnalyzer {

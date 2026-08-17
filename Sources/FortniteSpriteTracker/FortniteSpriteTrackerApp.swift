@@ -5,11 +5,13 @@ import AppKit
 struct FortniteSpriteTrackerApp: App {
     @NSApplicationDelegateAdaptor(MacApplicationDelegate.self) private var applicationDelegate
     @StateObject private var store = SpriteStore()
+    @StateObject private var liveCapture = LiveCaptureManager()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
+                .environmentObject(liveCapture)
                 .frame(minWidth: 980, minHeight: 680)
                 .background(WindowConfigurationView())
         }

@@ -3,6 +3,7 @@ import AppKit
 
 struct ContentView: View {
     @EnvironmentObject private var store: SpriteStore
+    @EnvironmentObject private var liveCapture: LiveCaptureManager
 
     @State private var activeSheet: ContentSheet?
     @State private var showFilters = false
@@ -69,6 +70,10 @@ struct ContentView: View {
             case .importer:
                 VideoImportSheet(initialProfileID: store.selectedProfileID)
                     .environmentObject(store)
+            case .liveCapture:
+                LiveCaptureSheet()
+                    .environmentObject(store)
+                    .environmentObject(liveCapture)
             case .profileEditor(let mode):
                 ProfileEditorSheet(mode: mode)
                     .environmentObject(store)
@@ -98,6 +103,32 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This permanently deletes this profile and its collection data. The last remaining profile cannot be deleted.")
+        }
+        .onAppear {
+            liveCapture.installGlobalHotkey(store: store)
+            if liveCapture.targetProfileID == nil {
+                liveCapture.targetProfileID = store.selectedProfileID
+            }
+        }
+        .onChange(of: liveCapture.resultRevision) { _, _ in
+            guard !liveCapture.latestDetections.isEmpty else { return }
+            let targetID = liveCapture.targetProfileID ?? store.selectedProfileID
+            guard let profile = store.profile(withID: targetID) else { return }
+
+            let summary = store.applyDetections(
+                liveCapture.latestDetections,
+                to: targetID,
+                replacingExisting: false
+            )
+            liveCapture.reportAppliedChanges(summary, profileName: profile.name)
+
+            if !liveCapture.isStreaming {
+                showStatus(
+                    "Captured \(liveCapture.latestDetections.count) Sprite card\(liveCapture.latestDetections.count == 1 ? "" : "s") into \(profile.name)",
+                    symbol: "camera.viewfinder",
+                    isError: false
+                )
+            }
         }
         .onChange(of: store.recentEvent) { _, event in
             guard event != nil else { return }
@@ -149,9 +180,19 @@ struct ContentView: View {
                     .disabled(isExportingPDF || store.selectedProfile == nil)
 
                     Button {
+                        activeSheet = .liveCapture
+                    } label: {
+                        Label(
+                            liveCapture.isStreaming ? "Live Scan" : "Live Capture",
+                            systemImage: liveCapture.isStreaming ? "dot.radiowaves.left.and.right" : "camera.viewfinder"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
                         activeSheet = .importer
                     } label: {
-                        Label("Import Recording", systemImage: "wand.and.stars.inverse")
+                        Label("Import Media", systemImage: "wand.and.stars.inverse")
                             .fontWeight(.bold)
                     }
                     .buttonStyle(.borderedProminent)
@@ -389,6 +430,7 @@ struct ContentView: View {
 
 private enum ContentSheet: Identifiable {
     case importer
+    case liveCapture
     case profileEditor(ProfileEditorMode)
     case comparison(primaryID: UUID, comparisonID: UUID)
 
@@ -396,6 +438,8 @@ private enum ContentSheet: Identifiable {
         switch self {
         case .importer:
             "importer"
+        case .liveCapture:
+            "live-capture"
         case .profileEditor(let mode):
             switch mode {
             case .create:

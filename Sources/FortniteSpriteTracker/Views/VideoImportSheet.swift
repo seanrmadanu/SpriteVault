@@ -10,7 +10,7 @@ struct VideoImportSheet: View {
     @State private var isImporterOpen = false
     @State private var analyzing = false
     @State private var progress = 0.0
-    @State private var scanText = "Waiting for a recording…"
+    @State private var scanText = "Waiting for media…"
     @State private var results: [DetectedSprite] = []
     @State private var errorText: String?
     @State private var scanning = false
@@ -27,8 +27,9 @@ struct VideoImportSheet: View {
         VStack(spacing: 22) {
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Auto-check from recording").font(.title2.weight(.black))
-                    Text("Reads the selected title, level, and Mastered banner from a high-resolution right-side crop.")
+                    Text("Auto-check from recording or screenshot")
+                        .font(.title2.weight(.black))
+                    Text(importDescription)
                         .foregroundStyle(.secondary)
                     HStack(spacing: 8) {
                         Label("Target profile", systemImage: "person.crop.circle.fill")
@@ -51,25 +52,42 @@ struct VideoImportSheet: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 24)
                     .fill(.white.opacity(0.045))
-                    .overlay(RoundedRectangle(cornerRadius: 24).stroke(style: StrokeStyle(lineWidth: 1.5, dash: [8, 8])).foregroundStyle(.white.opacity(0.18)))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 24)
+                            .stroke(
+                                style: StrokeStyle(lineWidth: 1.5, dash: [8, 8])
+                            )
+                            .foregroundStyle(.white.opacity(0.18))
+                    )
 
                 VStack(spacing: 14) {
-                    Image(systemName: fileURL == nil ? "movieclapper" : "film.stack.fill")
+                    Image(systemName: importIcon)
                         .font(.system(size: 48, weight: .bold))
                         .symbolEffect(.pulse, isActive: analyzing)
-                    Text(fileURL?.lastPathComponent ?? "Choose a Fortnite screen recording")
+                    Text(fileURL?.lastPathComponent ?? "Choose a Fortnite recording or screenshot")
                         .font(.headline)
-                    Button(fileURL == nil ? "Choose Video" : "Choose Another") { isImporterOpen = true }
-                        .buttonStyle(.borderedProminent)
+                    Button(fileURL == nil ? "Choose Media" : "Choose Another") {
+                        isImporterOpen = true
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
 
                 if analyzing {
                     GeometryReader { geo in
                         Rectangle()
-                            .fill(LinearGradient(colors: [.clear, .white.opacity(0.28), .clear], startPoint: .leading, endPoint: .trailing))
+                            .fill(
+                                LinearGradient(
+                                    colors: [.clear, .white.opacity(0.28), .clear],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
                             .frame(width: 110)
                             .offset(x: scanning ? geo.size.width : -120)
-                            .animation(.linear(duration: 1.25).repeatForever(autoreverses: false), value: scanning)
+                            .animation(
+                                .linear(duration: 1.25).repeatForever(autoreverses: false),
+                                value: scanning
+                            )
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 24))
                     .allowsHitTesting(false)
@@ -84,12 +102,13 @@ struct VideoImportSheet: View {
                             .font(.headline)
                         Spacer()
                         Text("\(Int(progress * 100))%")
-                            .monospacedDigit().foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
                             .contentTransition(.numericText())
                     }
                     ProgressView(value: progress)
                         .progressViewStyle(.linear)
-                    Text(scanText.isEmpty ? "Scanning frame text…" : scanText)
+                    Text(scanText.isEmpty ? "Scanning media…" : scanText)
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -104,17 +123,20 @@ struct VideoImportSheet: View {
                             HStack {
                                 Image(systemName: result.mastered ? "crown.fill" : "checkmark.circle.fill")
                                     .foregroundStyle(result.mastered ? .yellow : .green)
-                                Text(result.name).fontWeight(.semibold)
+                                Text(result.name)
+                                    .fontWeight(.semibold)
                                 Spacer()
                                 Text(result.mastered ? "MASTERED · LVL 5" : "LVL \(result.level)")
                                     .font(.caption2.weight(.black))
                                     .foregroundStyle(.secondary)
-                                Text("\(result.rarity.rawValue) · RIGHT PANEL · \(result.observations)x")
+                                Text(resultSourceText(result))
                                     .font(.caption2.monospaced())
                                     .foregroundStyle(.tertiary)
-                                Text(timestamp(result.timestamp))
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.tertiary)
+                                if !isScreenshotImport {
+                                    Text(timestamp(result.timestamp))
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.tertiary)
+                                }
                             }
                             .padding(10)
                             .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
@@ -135,7 +157,7 @@ struct VideoImportSheet: View {
 
                     HStack {
                         Text(replaceExisting
-                             ? "Clears \(targetProfileName), then marks only the selected Sprites detected in this recording."
+                             ? "Clears \(targetProfileName), then marks only the Sprites detected in this \(mediaNoun)."
                              : "Updates detected Sprites in \(targetProfileName) but leaves every other saved entry unchanged.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -156,7 +178,9 @@ struct VideoImportSheet: View {
             }
 
             if let errorText {
-                Text(errorText).foregroundStyle(.red).font(.caption)
+                Text(errorText)
+                    .foregroundStyle(.red)
+                    .font(.caption)
             }
 
             HStack {
@@ -164,10 +188,11 @@ struct VideoImportSheet: View {
                     showResetConfirmation = true
                 }
 
-                Text("Select every card for about 1 second. Wrapped titles and the Mastered banner are supported.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text(importHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Button("Analyze Recording") { analyze() }
+                Button(analyzeButtonTitle) { analyze() }
                     .buttonStyle(.borderedProminent)
                     .disabled(fileURL == nil || analyzing)
                     .keyboardShortcut(.defaultAction)
@@ -189,7 +214,10 @@ struct VideoImportSheet: View {
         .onChange(of: targetProfileID) { _, _ in
             resultsApplied = false
         }
-        .fileImporter(isPresented: $isImporterOpen, allowedContentTypes: [.movie, .mpeg4Movie, .quickTimeMovie]) { result in
+        .fileImporter(
+            isPresented: $isImporterOpen,
+            allowedContentTypes: [.movie, .image]
+        ) { result in
             switch result {
             case .success(let url):
                 fileURL = url
@@ -198,6 +226,11 @@ struct VideoImportSheet: View {
                 errorText = nil
                 resultsApplied = false
                 hasAnalyzed = false
+                let kind = mediaKind(for: url)
+                replaceExisting = kind == .video
+                scanText = kind == .screenshot
+                    ? "Ready to scan the visible Sprite cards. Merge mode is selected so later screenshots keep earlier matches."
+                    : "Ready to scan the selected Sprite details."
             case .failure(let error):
                 errorText = error.localizedDescription
             }
@@ -206,6 +239,8 @@ struct VideoImportSheet: View {
 
     private func analyze() {
         guard let fileURL else { return }
+        let screenshotImport = mediaKind(for: fileURL) == .screenshot
+
         analyzing = true
         scanning = true
         results = []
@@ -217,13 +252,30 @@ struct VideoImportSheet: View {
         Task {
             let didAccess = fileURL.startAccessingSecurityScopedResource()
             defer { if didAccess { fileURL.stopAccessingSecurityScopedResource() } }
+
             do {
-                let found = try await VideoSpriteAnalyzer().analyze(url: fileURL) { value, text in
+                let progressHandler: @Sendable (Double, String) -> Void = { value, text in
                     Task { @MainActor in
-                        withAnimation(.easeOut(duration: 0.15)) { progress = value }
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            progress = value
+                        }
                         scanText = text
                     }
                 }
+
+                let found: [DetectedSprite]
+                if screenshotImport {
+                    found = try await ScreenshotSpriteAnalyzer.shared.analyze(
+                        url: fileURL,
+                        onProgress: progressHandler
+                    )
+                } else {
+                    found = try await VideoSpriteAnalyzer().analyze(
+                        url: fileURL,
+                        onProgress: progressHandler
+                    )
+                }
+
                 await MainActor.run {
                     withAnimation(.spring(response: 0.55, dampingFraction: 0.8)) {
                         results = found
@@ -232,8 +284,11 @@ struct VideoImportSheet: View {
                         scanning = false
                         hasAnalyzed = true
                     }
+
                     if found.isEmpty {
-                        scanText = "No readable name and level found. Make sure each card is actually selected for 1 second."
+                        scanText = screenshotImport
+                            ? "No owned cards were confirmed. Use a Collection screenshot with the 3-column grid and readable Lvl labels."
+                            : "No readable name and level found. Make sure each card is actually selected for 1 second."
                     } else {
                         scanText = "Review the detections before applying them."
                     }
@@ -247,6 +302,52 @@ struct VideoImportSheet: View {
                 }
             }
         }
+    }
+
+    private func mediaKind(for url: URL) -> ImportedMediaKind {
+        guard let type = UTType(filenameExtension: url.pathExtension.lowercased()) else {
+            return .video
+        }
+        return type.conforms(to: .image) ? .screenshot : .video
+    }
+
+    private var isScreenshotImport: Bool {
+        guard let fileURL else { return false }
+        return mediaKind(for: fileURL) == .screenshot
+    }
+
+    private var importIcon: String {
+        guard fileURL != nil else { return "rectangle.stack.badge.play" }
+        return isScreenshotImport ? "photo.fill" : "film.stack.fill"
+    }
+
+    private var importDescription: String {
+        if isScreenshotImport {
+            return "Reads each visible card's level, then matches the Sprite artwork against the built-in 117-Sprite catalog. Level 5 is treated as Mastered."
+        }
+        return "Recordings read the selected title, level, and Mastered banner from the high-resolution right-side details panel."
+    }
+
+    private var importHint: String {
+        if isScreenshotImport {
+            return "One screenshot scans the visible cards only. Keep the full grid visible and use Merge for additional screenshots; Level 5 becomes Mastered."
+        }
+        return "Select every card for about 1 second. Wrapped titles and the Mastered banner are supported."
+    }
+
+    private var analyzeButtonTitle: String {
+        isScreenshotImport ? "Analyze Screenshot" : "Analyze Recording"
+    }
+
+    private var mediaNoun: String {
+        isScreenshotImport ? "screenshot" : "recording"
+    }
+
+    private func resultSourceText(_ result: DetectedSprite) -> String {
+        if isScreenshotImport {
+            return "\(result.rarity.rawValue) · SCREENSHOT CARD"
+        }
+        return "\(result.rarity.rawValue) · RIGHT PANEL · \(result.observations)x"
     }
 
     private func timestamp(_ value: Double) -> String {
@@ -268,4 +369,9 @@ struct VideoImportSheet: View {
         }
         return "Detected \(results.count) Sprite\(results.count == 1 ? "" : "s")"
     }
+}
+
+private enum ImportedMediaKind {
+    case video
+    case screenshot
 }
