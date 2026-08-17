@@ -208,10 +208,10 @@ struct LiveCaptureSheet: View {
 
             HStack(spacing: 8) {
                 Image(systemName: liveCapture.errorText == nil ? "waveform.path.ecg" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(liveCapture.errorText == nil ? .cyan : .red)
+                    .foregroundStyle(liveCapture.errorText == nil ? Color.cyan : Color.red)
                 Text(liveCapture.errorText ?? liveCapture.statusText)
                     .font(.caption.monospaced())
-                    .foregroundStyle(liveCapture.errorText == nil ? .secondary : .red)
+                    .foregroundStyle(liveCapture.errorText == nil ? Color.secondary : Color.red)
                     .lineLimit(2)
                 Spacer()
             }

@@ -5,7 +5,7 @@ import CoreImage
 import CoreMedia
 import CoreVideo
 
-final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
+final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     typealias DetectionHandler = @Sendable ([DetectedSprite]) -> Void
     typealias StatusHandler = @Sendable (String) -> Void
     typealias ErrorHandler = @Sendable (Error) -> Void
