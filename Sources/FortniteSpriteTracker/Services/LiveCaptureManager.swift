@@ -60,7 +60,7 @@ final class LiveCaptureManager: ObservableObject {
     @Published var targetProfileID: UUID? {
         didSet { lastDetectionSignature = "" }
     }
-    @Published var framesPerSecond = 3
+    @Published var framesPerSecond = 2
 
     @Published private(set) var systemSelection: SystemCaptureSelection?
     @Published private(set) var resolvedApplicationTarget: ResolvedCaptureTarget?
@@ -159,7 +159,7 @@ final class LiveCaptureManager: ObservableObject {
     func requestScreenRecordingPermission() {
         screenRecordingGranted = CGRequestScreenCaptureAccess()
         statusText = screenRecordingGranted
-            ? "Screen Recording access granted. You can choose a screen or window now."
+            ? "Screen Recording access granted. You can select the Fortnite area now."
             : "Allow Screen Recording for Sprite Vault in System Settings. macOS may require a relaunch."
     }
 
@@ -185,26 +185,60 @@ final class LiveCaptureManager: ObservableObject {
         }
     }
 
+    /// Recommended source picker. Apple's ScreenCaptureKit picker can select a
+    /// full-screen Fortnite/OBS window or an entire display even when that content
+    /// lives in another macOS Space. This is more reliable than trying to draw an
+    /// AppKit drag overlay over another app's exclusive full-screen Space.
     func chooseSystemCaptureSource() {
         guard !isStreaming else { return }
         sourceMode = .systemPicker
         errorText = nil
-        statusText = "Choose the exact Fortnite screen or window in the macOS picker…"
+        statusText = "Choose the Fortnite window or display in the macOS capture picker…"
 
         captureService.presentSystemPicker { [weak self] selection in
             Task { @MainActor in
                 guard let self else { return }
                 guard let selection else {
                     if self.systemSelection == nil {
-                        self.statusText = "No screen/window selected yet."
+                        self.statusText = "No Fortnite source selected yet."
                     }
                     return
                 }
 
                 self.systemSelection = selection
-                self.statusText = "Selected \(selection.displayName) · \(selection.sizeText). Verifying preview…"
-                await self.refreshPreview()
+                self.statusText = "Selected \(selection.displayName) · \(selection.sizeText). Ready to scan."
             }
+        }
+    }
+
+    /// Optional screenshot-style crop for windowed setups. Full-screen users
+    /// should use chooseSystemCaptureSource(), which works across Spaces.
+    func chooseRegionCaptureSource() {
+        guard !isStreaming else { return }
+        sourceMode = .systemPicker
+        errorText = nil
+        statusText = "Drag around the full Fortnite viewport…"
+
+        captureService.presentRegionSelector { [weak self] selection in
+            Task { @MainActor in
+                guard let self else { return }
+                guard let selection else {
+                    if self.systemSelection == nil {
+                        self.statusText = "No custom area selected."
+                    }
+                    return
+                }
+
+                self.systemSelection = selection
+                self.statusText = "Selected custom area · \(selection.sizeText). Ready to scan."
+            }
+        }
+    }
+
+    func setLivePreviewEnabled(_ enabled: Bool) {
+        captureService.setPreviewEnabled(enabled)
+        if !enabled, isStreaming {
+            previewImage = nil
         }
     }
 
@@ -222,7 +256,11 @@ final class LiveCaptureManager: ObservableObject {
         }
 
         if sourceMode == .systemPicker {
-            systemSelection = captureService.systemSelection
+            if let existingSelection = captureService.systemSelection {
+                systemSelection = existingSelection
+            } else {
+                systemSelection = await captureService.restoreSavedRegionSelection()
+            }
             statusText = sourceReadyDescription
             return
         }
@@ -380,7 +418,7 @@ final class LiveCaptureManager: ObservableObject {
     func captureOnce() async {
         guard !isCapturingOnce, !isStreaming else { return }
         guard sourceMode != .captureDevice else {
-            errorText = "Capture Once is available for screen/window sources. Use Start Scan for a capture device."
+            errorText = "Capture Once is available for screen-area capture. Use Start Scan for a capture device."
             return
         }
 
@@ -675,7 +713,7 @@ final class LiveCaptureManager: ObservableObject {
     var selectedSourceDisplayName: String {
         switch sourceMode {
         case .systemPicker:
-            return systemSelection?.displayName ?? "No screen/window selected"
+            return systemSelection?.displayName ?? "No capture source selected"
         case .application:
             return selectedApplication?.displayName ?? "No application selected"
         case .window:
@@ -725,7 +763,7 @@ final class LiveCaptureManager: ObservableObject {
             if let selection = systemSelection {
                 return "Ready: \(selection.styleName) — \(selection.displayName) · \(selection.sizeText)."
             }
-            return "Choose the Fortnite screen/window with the macOS sharing picker."
+            return "Select the Fortnite window/display. Use Custom Area only for windowed setups."
         case .application:
             if let app = selectedApplication {
                 if let target = resolvedApplicationTarget {
@@ -745,11 +783,11 @@ final class LiveCaptureManager: ObservableObject {
         switch sourceMode {
         case .systemPicker:
             guard systemSelection != nil, captureService.hasSystemSelection else {
-                await failToStart("Choose the Fortnite screen or window in Live Capture first.")
+                await failToStart("Select the Fortnite window/display or a custom area in Live Capture first.")
                 return false
             }
             guard screenRecordingGranted || CGPreflightScreenCaptureAccess() else {
-                await failToStart("Screen Recording permission is required for screen/window capture.")
+                await failToStart("Screen Recording permission is required for live capture.")
                 return false
             }
         case .application:
@@ -885,9 +923,9 @@ final class LiveCaptureManager: ObservableObject {
     private func receiveCaptureStatus(_ status: String) {
         statusText = status
         let lower = status.lowercased()
-        if lower.contains("fast scrolling") || lower.contains("settle") {
+        if lower.contains("screen moving") || lower.contains("settle") || lower.contains("temporarily idle") {
             scanPhase = .waitingForStability
-        } else if lower.contains("stable view") || lower.contains("reading") {
+        } else if lower.contains("screen stable") || lower.contains("stable view") || lower.contains("reading") {
             scanPhase = .scanning
         } else if lower.contains("connected") || lower.contains("capture active") {
             scanPhase = .waitingForCollection
@@ -1033,7 +1071,7 @@ final class LiveCaptureManager: ObservableObject {
         let start = Date()
         sessionTimerTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self?.sessionElapsedSeconds = max(Int(Date().timeIntervalSince(start)), 0)

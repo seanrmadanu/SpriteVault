@@ -9,7 +9,6 @@ struct ContentView: View {
     @State private var activeSheet: ContentSheet?
     @State private var showFilters = false
     @State private var toastVisible = false
-    @State private var sparkle = false
     @State private var showResetConfirmation = false
     @State private var showDeleteProfileConfirmation = false
     @State private var isExportingPDF = false
@@ -36,29 +35,16 @@ struct ContentView: View {
                                 SpriteCard(
                                     item: item,
                                     highlighted: highlightedSpriteName == item.name,
-                                    onOwned: {
-                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
-                                            store.toggleOwned(item)
-                                        }
-                                    },
-                                    onMastered: {
-                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
-                                            store.toggleMastered(item)
-                                        }
-                                    },
-                                    onLevel: { level in
-                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
-                                            store.setLevel(level, for: item)
-                                        }
-                                    }
+                                    onOwned: { store.toggleOwned(item) },
+                                    onMastered: { store.toggleMastered(item) },
+                                    onLevel: { level in store.setLevel(level, for: item) }
                                 )
                                 .id(item.name)
                             }
                         }
                         .padding(.horizontal, 22)
-                        .padding(.top, 34)
-                        .padding(.bottom, 100)
-                        .animation(.spring(response: 0.42, dampingFraction: 0.85), value: filteredSprites.count)
+                        .padding(.top, 20)
+                        .padding(.bottom, 80)
                     }
                     .scrollClipDisabled()
                     .onChange(of: store.focusRequest) { _, request in
@@ -137,7 +123,6 @@ struct ContentView: View {
                 liveCapture.targetProfileID = store.selectedProfileID
             }
             routePendingNotificationIfNeeded()
-            Task { await liveCapture.refreshSources() }
         }
         .onChange(of: store.selectedProfileID) { _, id in
             if !liveCapture.isHotkeyScanning {
@@ -167,7 +152,6 @@ struct ContentView: View {
         .onChange(of: store.recentEvent) { _, event in
             guard event != nil else { return }
             withAnimation(.spring(response: 0.4, dampingFraction: 0.72)) { toastVisible = true }
-            if event?.kind == .mastered { sparkle.toggle() }
             Task {
                 try? await Task.sleep(for: .seconds(1.8))
                 await MainActor.run {
@@ -199,84 +183,83 @@ struct ContentView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 24) {
-            VStack(alignment: .leading, spacing: 7) {
-                Text("SPRITE VAULT")
-                    .font(.system(size: 27, weight: .black, design: .rounded))
-                    .tracking(1.8)
-                Text("Fortnite collection checklist")
-                    .foregroundStyle(.secondary)
-                profileMenu
-            }
+        VStack(spacing: 12) {
+            HStack(alignment: .center, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("SPRITE VAULT")
+                        .font(.system(size: 26, weight: .black, design: .rounded))
+                        .tracking(1.5)
+                    profileMenu
+                }
 
-            Spacer(minLength: 18)
+                Spacer(minLength: 12)
 
-            VStack(alignment: .trailing, spacing: 10) {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     ProgressPill(title: "Owned", value: store.ownedCount, total: store.sprites.count, symbol: "checkmark")
                     ProgressPill(title: "Mastered", value: store.masteredCount, total: store.sprites.count, symbol: "crown.fill")
-                        .symbolEffect(.pulse, value: sparkle)
                     if store.lostCount > 0 {
                         ProgressPill(title: "Lost", value: store.lostCount, total: store.sprites.count, symbol: "clock.arrow.circlepath")
                     }
                 }
+            }
 
-                HStack(spacing: 9) {
-                    Button {
-                        presentComparison()
-                    } label: {
-                        Label("Compare", systemImage: "arrow.left.arrow.right")
+            HStack(spacing: 9) {
+                Spacer()
+
+                Button {
+                    showActivityCenter.toggle()
+                } label: {
+                    Label(activityStore.unreadCount > 0 ? "Activity \(min(activityStore.unreadCount, 99))" : "Activity", systemImage: "bell")
+                }
+                .buttonStyle(.bordered)
+                .popover(isPresented: $showActivityCenter, arrowEdge: .top) {
+                    ActivityCenterView()
+                        .environmentObject(activityStore)
+                        .environmentObject(store)
+                }
+
+                LiveCaptureHeaderButton(liveCapture: liveCapture) {
+                    activeSheet = .liveCapture
+                }
+
+                Button {
+                    activeSheet = .importer
+                } label: {
+                    Label("Import", systemImage: "square.and.arrow.down")
+                        .fontWeight(.bold)
+                }
+                .buttonStyle(.borderedProminent)
+
+                Menu {
+                    Button { presentComparison() } label: {
+                        Label("Compare Profiles", systemImage: "arrow.left.arrow.right")
                     }
-                    .buttonStyle(.bordered)
                     .disabled(store.profiles.count < 2)
 
                     Button(action: exportPDF) {
-                        Label(isExportingPDF ? "Exporting..." : "Export PDF", systemImage: isExportingPDF ? "hourglass" : "square.and.arrow.up")
+                        Label(isExportingPDF ? "Exporting PDF…" : "Export PDF", systemImage: "square.and.arrow.up")
                     }
-                    .buttonStyle(.bordered)
                     .disabled(isExportingPDF || store.selectedProfile == nil)
 
-                    Button {
-                        showActivityCenter.toggle()
-                    } label: {
-                        ZStack(alignment: .topTrailing) {
-                            Label("Activity", systemImage: "bell")
-                            if activityStore.unreadCount > 0 {
-                                Text("\(min(activityStore.unreadCount, 99))")
-                                    .font(.system(size: 8, weight: .black, design: .rounded))
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(.red, in: Capsule())
-                                    .foregroundStyle(.white)
-                                    .offset(x: 9, y: -7)
-                            }
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .popover(isPresented: $showActivityCenter, arrowEdge: .top) {
-                        ActivityCenterView()
-                            .environmentObject(activityStore)
-                            .environmentObject(store)
-                    }
+                    Divider()
 
-                    LiveCaptureHeaderButton(liveCapture: liveCapture) {
-                        activeSheet = .liveCapture
-                    }
-
-                    Button {
-                        activeSheet = .importer
+                    Button(role: .destructive) {
+                        showResetConfirmation = true
                     } label: {
-                        Label("Import Media", systemImage: "wand.and.stars.inverse")
-                            .fontWeight(.bold)
+                        Label("Clear Current Profile", systemImage: "trash")
                     }
-                    .buttonStyle(.borderedProminent)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.title3)
                 }
-                .controlSize(.large)
+                .menuStyle(.borderlessButton)
+                .frame(width: 34)
             }
+            .controlSize(.regular)
         }
         .padding(.horizontal, 22)
-        .padding(.top, 18)
-        .padding(.bottom, 14)
+        .padding(.top, 16)
+        .padding(.bottom, 10)
     }
 
     private var profileMenu: some View {
@@ -324,7 +307,7 @@ struct ContentView: View {
                     .foregroundStyle(.cyan)
                 Text(store.selectedProfileName)
                     .font(.subheadline.weight(.bold))
-                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 Text("\(store.profiles.count)")
                     .font(.caption2.monospacedDigit().weight(.black))
                     .padding(.horizontal, 6)
@@ -344,61 +327,57 @@ struct ContentView: View {
     }
 
     private var filters: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                HStack(spacing: 10) {
-                    NativeSearchField(text: $store.searchText, placeholder: "Search all 117 Sprites")
-                        .frame(minWidth: 260, minHeight: 30)
+        VStack(spacing: 8) {
+            HStack(spacing: 9) {
+                NativeSearchField(text: $store.searchText, placeholder: "Search Sprites")
+                    .frame(minWidth: 240, maxWidth: 460, minHeight: 30)
 
-                    if !store.searchText.isEmpty {
-                        Text("\(store.filteredSprites.count) found")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .contentTransition(.numericText())
-                    }
+                if !store.searchText.isEmpty {
+                    Text("\(store.filteredSprites.count) found")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+
+                Spacer()
 
                 Button {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) { showFilters.toggle() }
+                    showFilters.toggle()
                 } label: {
                     Label("Filters", systemImage: showFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
                 }
                 .buttonStyle(.bordered)
-
-                Button("Clear Profile") { showResetConfirmation = true }
-                    .buttonStyle(.bordered)
             }
 
             if showFilters {
-                HStack(spacing: 8) {
-                    filterChip("All", selected: store.selectedRarity == nil) { store.selectedRarity = nil }
-                    ForEach(SpriteRarity.allCases, id: \.self) { rarity in
-                        filterChip(rarity.rawValue.capitalized, selected: store.selectedRarity == rarity) { store.selectedRarity = rarity }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        filterChip("All", selected: store.selectedRarity == nil) { store.selectedRarity = nil }
+                        ForEach(SpriteRarity.allCases, id: \.self) { rarity in
+                            filterChip(rarity.rawValue.capitalized, selected: store.selectedRarity == rarity) { store.selectedRarity = rarity }
+                        }
+
+                        Divider().frame(height: 22)
+
+                        Toggle("Owned", isOn: Binding(
+                            get: { store.showOnlyOwned },
+                            set: { store.setOwnedFilter($0) }
+                        ))
+                        .toggleStyle(.button)
+
+                        Toggle("Not Owned", isOn: Binding(
+                            get: { store.showOnlyNotOwned },
+                            set: { store.setNotOwnedFilter($0) }
+                        ))
+                        .toggleStyle(.button)
+
+                        Toggle("Mastered", isOn: Binding(
+                            get: { store.showOnlyMastered },
+                            set: { store.setMasteredFilter($0) }
+                        ))
+                        .toggleStyle(.button)
                     }
-                    Divider().frame(height: 22)
-                    Toggle("Owned", isOn: Binding(
-                        get: { store.showOnlyOwned },
-                        set: { store.setOwnedFilter($0) }
-                    ))
-                    .toggleStyle(.button)
-
-                    Toggle("Not Owned", isOn: Binding(
-                        get: { store.showOnlyNotOwned },
-                        set: { store.setNotOwnedFilter($0) }
-                    ))
-                    .toggleStyle(.button)
-
-                    Toggle("Mastered", isOn: Binding(
-                        get: { store.showOnlyMastered },
-                        set: { store.setMasteredFilter($0) }
-                    ))
-                    .toggleStyle(.button)
-                    Spacer()
+                    .padding(.vertical, 2)
                 }
-                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .padding(.horizontal, 22)
@@ -409,8 +388,6 @@ struct ContentView: View {
         Button(action: action) { Text(title).font(.caption.weight(.bold)) }
             .buttonStyle(.borderedProminent)
             .tint(selected ? .white.opacity(0.22) : .white.opacity(0.07))
-            .scaleEffect(selected ? 1.03 : 1)
-            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: selected)
     }
 
     private func spriteToast(_ event: SpriteEvent) -> some View {

@@ -74,8 +74,8 @@ private final class SpriteImageCache {
     private let loadQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.name = "Sprite image decoding"
-        queue.qualityOfService = .userInitiated
-        queue.maxConcurrentOperationCount = 4
+        queue.qualityOfService = .utility
+        queue.maxConcurrentOperationCount = 2
         return queue
     }()
 
@@ -123,11 +123,11 @@ private final class SpriteImageCache {
         }
 
         // Cards display artwork at roughly 280 physical pixels on a Retina Mac.
-        // A 320 px thumbnail avoids decoding every 512 px source at full size.
+        // A 288 px thumbnail avoids decoding every 512 px source at full size while keeping the grid crisp.
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 320,
+            kCGImageSourceThumbnailMaxPixelSize: 288,
             kCGImageSourceShouldCacheImmediately: true
         ]
 

@@ -1,53 +1,21 @@
 import SwiftUI
 
+/// Kept under the original name so existing views do not change, but the
+/// background is intentionally static now. Repeating large radial-gradient
+/// animations forced continuous recomposition while the user was scrolling or
+/// while Vision was scanning in the background.
 struct AnimatedBackground: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var drift = false
-
     var body: some View {
-        ZStack {
-            LinearGradient(colors: [Color.black, Color(red: 0.07, green: 0.06, blue: 0.13)], startPoint: .topLeading, endPoint: .bottomTrailing)
-
-            glow(
-                color: .purple,
-                size: 520,
-                from: CGSize(width: -330, height: -250),
-                to: CGSize(width: -180, height: -120)
-            )
-            glow(
-                color: .indigo,
-                size: 460,
-                from: CGSize(width: 360, height: 250),
-                to: CGSize(width: 220, height: 140)
-            )
-            glow(
-                color: .blue,
-                size: 340,
-                from: CGSize(width: 270, height: -310),
-                to: CGSize(width: 390, height: -170)
-            )
-        }
+        LinearGradient(
+            colors: [
+                Color.black,
+                Color(red: 0.055, green: 0.052, blue: 0.085),
+                Color(red: 0.075, green: 0.060, blue: 0.115)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
         .ignoresSafeArea()
         .allowsHitTesting(false)
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 16).repeatForever(autoreverses: true)) {
-                drift.toggle()
-            }
-        }
-    }
-
-    private func glow(color: Color, size: CGFloat, from: CGSize, to: CGSize) -> some View {
-        Circle()
-            .fill(
-                RadialGradient(
-                    colors: [color.opacity(0.13), color.opacity(0.035), .clear],
-                    center: .center,
-                    startRadius: 0,
-                    endRadius: size / 2
-                )
-            )
-            .frame(width: size, height: size)
-            .offset(drift ? to : from)
     }
 }

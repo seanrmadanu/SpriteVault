@@ -7,34 +7,41 @@ struct LiveCaptureSheet: View {
     @EnvironmentObject private var liveCapture: LiveCaptureManager
     @EnvironmentObject private var activityStore: ActivityStore
 
+    @State private var showPermissions = false
+    @State private var showPreview = false
+
     var body: some View {
         ScrollView {
-            VStack(spacing: 18) {
+            VStack(spacing: 14) {
                 header
-                permissionsCard
                 sourceCard
-                previewCard
-                controlsCard
+                scanCard
+                if showPreview { previewCard }
                 resultsCard
+                permissionsDisclosure
             }
-            .padding(24)
+            .padding(20)
         }
-        .frame(width: 860, height: 820)
+        .frame(minWidth: 720, idealWidth: 800, minHeight: 620, idealHeight: 760)
         .background(AnimatedBackground())
         .task {
             liveCapture.installGlobalHotkey(store: store, activityStore: activityStore)
+            liveCapture.setLivePreviewEnabled(showPreview)
             if liveCapture.targetProfileID == nil {
                 liveCapture.targetProfileID = store.selectedProfileID
             }
             await liveCapture.refreshSources()
-            if liveCapture.sourceMode == .systemPicker, liveCapture.systemSelection != nil {
+            if showPreview, liveCapture.sourceMode == .systemPicker, liveCapture.systemSelection != nil {
                 await liveCapture.refreshPreview()
             }
+        }
+        .onDisappear {
+            liveCapture.setLivePreviewEnabled(false)
         }
         .onChange(of: liveCapture.sourceMode) { _, mode in
             Task {
                 await liveCapture.refreshSources()
-                if mode == .systemPicker, liveCapture.systemSelection != nil {
+                if showPreview, mode == .systemPicker, liveCapture.systemSelection != nil {
                     await liveCapture.refreshPreview()
                 }
             }
@@ -42,351 +49,159 @@ struct LiveCaptureSheet: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 5) {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text("Live Capture")
                     .font(.title2.weight(.black))
-                Text("Choose any way Fortnite reaches your Mac. Sprite Vault verifies the Sprites Collection before saving data.")
+                Text("Select Fortnite, start the scan, then return to the game.")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button(showPreview ? "Hide Preview" : "Show Preview") {
+                showPreview.toggle()
+                liveCapture.setLivePreviewEnabled(showPreview)
+                if showPreview, liveCapture.systemSelection != nil, !liveCapture.isStreaming {
+                    Task { await liveCapture.refreshPreview() }
+                }
+            }
+            .buttonStyle(.bordered)
             Button("Done") { dismiss() }
         }
     }
 
-    private var permissionsCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Permissions").font(.headline)
-
-            permissionRow(
-                title: "Screen Recording",
-                detail: "Required for Screen / Window capture.",
-                granted: liveCapture.screenRecordingGranted,
-                buttonTitle: "Request Access"
-            ) { liveCapture.requestScreenRecordingPermission() }
-
-            Divider()
-
-            permissionRow(
-                title: "Capture Device / Camera",
-                detail: "Required only when reading a USB capture card directly with AVFoundation.",
-                granted: liveCapture.captureDeviceGranted,
-                buttonTitle: "Enable Device"
-            ) { liveCapture.requestCaptureDevicePermission() }
-
-            Divider()
-
-            permissionRow(
-                title: "Accessibility",
-                detail: "Required for the global \(liveCapture.shortcutText) hotkey while another app is focused.",
-                granted: liveCapture.accessibilityGranted,
-                buttonTitle: "Enable Hotkey"
-            ) { liveCapture.requestAccessibilityPermission() }
-
-            Divider()
-
-            permissionRow(
-                title: "Notifications",
-                detail: "Start/completion summaries and clickable new, level, mastery, and lost-Sprite alerts.",
-                granted: liveCapture.notificationsGranted,
-                buttonTitle: "Enable Alerts"
-            ) { liveCapture.requestNotificationPermission() }
-        }
-        .padding(16)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.08)))
-    }
-
     private var sourceCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Capture Source").font(.headline)
-                    Text("Pick the exact Fortnite screen/window visually, or read a USB capture device directly.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text("Source")
+                    .font(.headline)
                 Spacer()
-                if liveCapture.sourceMode == .captureDevice {
-                    Button {
-                        Task { await liveCapture.refreshSources() }
-                    } label: {
-                        Label(liveCapture.isRefreshing ? "Refreshing…" : "Refresh Devices", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(liveCapture.isRefreshing || liveCapture.isStreaming)
+                Picker("Source", selection: $liveCapture.sourceMode) {
+                    Text("Screen / Window").tag(CaptureSourceMode.systemPicker)
+                    Text("Capture Device").tag(CaptureSourceMode.captureDevice)
                 }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 270)
+                .disabled(liveCapture.isStreaming)
             }
-
-            Picker("Source", selection: $liveCapture.sourceMode) {
-                Label("Screen / Window", systemImage: "rectangle.on.rectangle").tag(CaptureSourceMode.systemPicker)
-                Label("Capture Device", systemImage: "video.fill").tag(CaptureSourceMode.captureDevice)
-            }
-            .pickerStyle(.segmented)
-            .disabled(liveCapture.isStreaming)
 
             if liveCapture.sourceMode == .systemPicker {
-                systemPickerSource
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Button {
+                            liveCapture.chooseSystemCaptureSource()
+                        } label: {
+                            Label(
+                                liveCapture.systemSelection == nil ? "Select Window / Screen" : "Change Window / Screen",
+                                systemImage: "rectangle.on.rectangle"
+                            )
+                            .fontWeight(.bold)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(liveCapture.isStreaming)
+
+                        Button {
+                            liveCapture.chooseRegionCaptureSource()
+                        } label: {
+                            Label("Custom Area", systemImage: "viewfinder.rectangular")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(liveCapture.isStreaming)
+                    }
+
+                    Text("Use Window / Screen for full-screen Fortnite or OBS Projector. Custom Area is best for windowed setups. For recognition, include the full Fortnite viewport rather than only the card grid.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let selection = liveCapture.systemSelection {
+                        HStack(spacing: 9) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(selection.displayName)
+                                    .font(.subheadline.weight(.bold))
+                                    .lineLimit(nil)
+                                Text("\(selection.styleName) · \(selection.sizeText)")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(10)
+                        .background(.green.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
             } else {
                 devicePicker
             }
 
-            HStack(spacing: 12) {
-                Text("Profile")
-                    .frame(width: 105, alignment: .leading)
+            Divider()
+
+            HStack(spacing: 10) {
+                Label("Profile", systemImage: "person.crop.circle")
+                    .font(.subheadline.weight(.semibold))
                 Picker("Profile", selection: profileSelection) {
                     ForEach(store.profiles) { profile in
                         Text(profile.name).tag(profile.id)
                     }
                 }
                 .labelsHidden()
-                .frame(maxWidth: 320, alignment: .leading)
+                .frame(maxWidth: 300)
                 .disabled(liveCapture.isStreaming)
+                Spacer()
             }
         }
-        .padding(16)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.08)))
-    }
-
-    private var systemPickerSource: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Button {
-                liveCapture.chooseSystemCaptureSource()
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "rectangle.on.rectangle.angled")
-                        .font(.title3.weight(.bold))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(liveCapture.systemSelection == nil ? "Choose Screen or Window…" : "Change Screen or Window…")
-                            .font(.headline)
-                        Text("macOS shows visual thumbnails for screens and windows — including full-screen Spaces.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 6)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(liveCapture.isStreaming)
-
-            if let selection = liveCapture.systemSelection {
-                HStack(spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(.green.opacity(0.14))
-                            .frame(width: 42, height: 42)
-                        Image(systemName: selection.styleName == "Screen" ? "display" : "macwindow")
-                            .foregroundStyle(.green)
-                            .font(.system(size: 18, weight: .bold))
-                    }
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(selection.displayName)
-                            .font(.subheadline.weight(.bold))
-                            .lineLimit(1)
-                        Text("\(selection.styleName) · \(selection.sizeText) · \(selection.detail)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                    Spacer()
-                    Label("Selected", systemImage: "checkmark.circle.fill")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.green)
-                }
-                .padding(12)
-                .background(.green.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.green.opacity(0.22)))
-            } else {
-                HStack(spacing: 8) {
-                    Image(systemName: "info.circle")
-                    Text("This replaces the old Application + Specific Window dropdowns. Pick the source by thumbnail, like a screen-sharing app.")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var applicationPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                Text("Application")
-                    .frame(width: 105, alignment: .leading)
-                Picker("Application", selection: applicationSelection) {
-                    Text("Choose an app…").tag("")
-                    ForEach(liveCapture.applications) { app in
-                        Text("\(app.applicationName) · \(app.windowCount) window\(app.windowCount == 1 ? "" : "s")")
-                            .tag(app.id)
-                    }
-                }
-                .labelsHidden()
-                .frame(maxWidth: 420, alignment: .leading)
-                .disabled(liveCapture.isStreaming)
-            }
-
-            if let target = liveCapture.resolvedApplicationTarget {
-                Label(
-                    "Auto window: \(target.windowTitle.isEmpty ? target.applicationName : target.windowTitle) · \(target.width)×\(target.height)",
-                    systemImage: "viewfinder.circle.fill"
-                )
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.green)
-            } else if liveCapture.selectedApplication != nil {
-                Label("Application selected, but no shareable gameplay window is available yet.", systemImage: "hourglass")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-        }
-    }
-
-    private var windowPicker: some View {
-        HStack(spacing: 12) {
-            Text("Window")
-                .frame(width: 105, alignment: .leading)
-            Picker("Window", selection: windowSelection) {
-                Text("Choose a window…").tag(CGWindowID(0))
-                ForEach(liveCapture.windows) { window in
-                    Text("\(window.displayName) · \(window.sizeText)").tag(window.id)
-                }
-            }
-            .labelsHidden()
-            .frame(maxWidth: 520, alignment: .leading)
-            .disabled(liveCapture.isStreaming)
-        }
+        .cardStyle()
     }
 
     private var devicePicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                Text("Video Device")
-                    .frame(width: 105, alignment: .leading)
-                Picker("Capture Device", selection: captureDeviceSelection) {
-                    Text("Choose a device…").tag("")
-                    ForEach(liveCapture.captureDevices) { device in
-                        Text(device.displayName).tag(device.id)
-                    }
+        HStack(spacing: 10) {
+            Picker("Capture Device", selection: captureDeviceSelection) {
+                Text("Choose a device…").tag("")
+                ForEach(liveCapture.captureDevices) { device in
+                    Text(device.displayName).tag(device.id)
                 }
-                .labelsHidden()
-                .frame(maxWidth: 480, alignment: .leading)
-                .disabled(liveCapture.isStreaming)
             }
-            Text("Use this for USB capture cards/VCC/UVC devices. It bypasses OBS and ScreenCaptureKit and reads the video feed directly.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .labelsHidden()
+            .frame(maxWidth: 420)
+            .disabled(liveCapture.isStreaming)
+
+            Button {
+                Task { await liveCapture.refreshSources() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .disabled(liveCapture.isRefreshing || liveCapture.isStreaming)
+            Spacer()
         }
     }
 
-    private var previewCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("What Sprite Vault Sees").font(.headline)
-                Spacer()
-                if liveCapture.sourceMode == .systemPicker && liveCapture.systemSelection != nil && !liveCapture.isStreaming {
-                    Button {
-                        Task { await liveCapture.refreshPreview() }
-                    } label: {
-                        Label(liveCapture.isPreviewRefreshing ? "Loading…" : "Refresh Preview", systemImage: "eye")
-                    }
-                    .disabled(liveCapture.isPreviewRefreshing)
-                }
-            }
-
-            ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(.black.opacity(0.48))
-
-                if let image = liveCapture.previewImage {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .padding(6)
-
-                    if let source = liveCapture.previewSourceLabel {
-                        Label(source, systemImage: "viewfinder")
-                            .font(.caption2.weight(.bold))
-                            .lineLimit(1)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 6)
-                            .background(.black.opacity(0.72), in: Capsule())
-                            .overlay(Capsule().stroke(.white.opacity(0.16)))
-                            .padding(12)
-                    }
-                } else if liveCapture.isPreviewRefreshing {
-                    VStack(spacing: 9) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Locking preview to the selected source…")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    VStack(spacing: 8) {
-                        Image(systemName: "rectangle.dashed.and.paperclip")
-                            .font(.system(size: 28, weight: .bold))
-                        Text(liveCapture.sourceMode == .captureDevice
-                             ? "Start a scan to see the live capture-device preview."
-                             : "Choose a screen/window above, then Sprite Vault shows exactly what it will read.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            }
-            .frame(height: 210)
-
-            HStack(spacing: 8) {
-                Image(systemName: liveCapture.isCollectionScreenDetected ? "checkmark.seal.fill" : "scope")
-                    .foregroundStyle(liveCapture.isCollectionScreenDetected ? .green : .secondary)
-                Text(liveCapture.isCollectionScreenDetected
-                     ? "Fortnite Sprites → Collection confirmed"
-                     : "Sprite data is never saved until Sprites → Collection is visually confirmed")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(16)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.08)))
-    }
-
-    private var controlsCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Adaptive Hotkey Scan").font(.headline)
-                    Text("Press \(liveCapture.shortcutText) once. Fast scrolling pauses heavy OCR; each stable view is read once. The session auto-finishes only after all 117 catalog positions have actually been covered.")
+    private var scanCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Scanner")
+                        .font(.headline)
+                    Text("Heavy Vision work runs only after the collection stops moving.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Picker("FPS", selection: $liveCapture.framesPerSecond) {
-                    Text("2 FPS").tag(2)
-                    Text("3 FPS").tag(3)
-                    Text("5 FPS").tag(5)
+
+                Picker("Speed", selection: $liveCapture.framesPerSecond) {
+                    Text("Efficient · 2 FPS").tag(2)
+                    Text("Responsive · 3 FPS").tag(3)
                 }
+                .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: 220)
+                .frame(width: 255)
                 .disabled(liveCapture.isStreaming)
             }
 
-            if liveCapture.isHotkeyScanning {
-                HStack(spacing: 10) {
-                    metric("STATUS", liveCapture.scanPhase.label, symbol: "dot.radiowaves.left.and.right")
-                    metric("TIME", liveCapture.elapsedText, symbol: "timer")
-                    metric("COLLECTION", liveCapture.collectionText, symbol: "checkmark.circle")
-                    metric("SCAN", liveCapture.coverageText, symbol: "scope")
-                    metric("CHANGES", "+\(liveCapture.changesSoFar)", symbol: "sparkles")
-                }
-            }
-
-            HStack(spacing: 10) {
+            HStack(spacing: 9) {
                 if liveCapture.isHotkeyScanning {
                     Button(role: .destructive) {
                         Task { await liveCapture.stopStreaming() }
@@ -398,7 +213,7 @@ struct LiveCaptureSheet: View {
                     Button {
                         Task { await liveCapture.startHotkeyScanSession() }
                     } label: {
-                        Label("Start \(liveCapture.shortcutText) Scan", systemImage: "keyboard.badge.ellipsis")
+                        Label("Start Scan", systemImage: "play.fill")
                             .fontWeight(.bold)
                     }
                     .buttonStyle(.borderedProminent)
@@ -407,75 +222,202 @@ struct LiveCaptureSheet: View {
                 Button {
                     Task { await liveCapture.captureOnce() }
                 } label: {
-                    Label(liveCapture.isCapturingOnce ? "Scanning…" : "Capture Once", systemImage: "camera.viewfinder")
+                    Label(liveCapture.isCapturingOnce ? "Scanning…" : "Scan Current View", systemImage: "camera.viewfinder")
                 }
                 .buttonStyle(.bordered)
                 .disabled(liveCapture.sourceMode == .captureDevice || liveCapture.isCapturingOnce || liveCapture.isStreaming)
+
+                Spacer()
+
+                Label(liveCapture.shortcutText, systemImage: "keyboard")
+                    .font(.caption.monospaced().weight(.bold))
+                    .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 8) {
+            if liveCapture.isHotkeyScanning {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], alignment: .leading, spacing: 8) {
+                    metric("Status", liveCapture.scanPhase.label, symbol: "dot.radiowaves.left.and.right")
+                    metric("Time", liveCapture.elapsedText, symbol: "timer")
+                    metric("Collection", liveCapture.collectionText, symbol: "checkmark.circle")
+                    metric("Coverage", liveCapture.coverageText, symbol: "scope")
+                    metric("Changes", "+\(liveCapture.changesSoFar)", symbol: "sparkles")
+                }
+            }
+
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: liveCapture.errorText == nil ? "waveform.path.ecg" : "exclamationmark.triangle.fill")
                     .foregroundStyle(liveCapture.errorText == nil ? Color.cyan : Color.red)
                 Text(liveCapture.errorText ?? liveCapture.statusText)
-                    .font(.caption.monospaced())
+                    .font(.caption)
                     .foregroundStyle(liveCapture.errorText == nil ? Color.secondary : Color.red)
-                    .lineLimit(3)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
             }
         }
-        .padding(16)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.08)))
+        .cardStyle()
+    }
+
+    private var previewCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Preview")
+                    .font(.headline)
+                Spacer()
+                if liveCapture.systemSelection != nil && !liveCapture.isStreaming {
+                    Button {
+                        Task { await liveCapture.refreshPreview() }
+                    } label: {
+                        Label(liveCapture.isPreviewRefreshing ? "Loading…" : "Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(liveCapture.isPreviewRefreshing)
+                }
+            }
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(.black.opacity(0.44))
+
+                if let image = liveCapture.previewImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(5)
+                } else if liveCapture.isPreviewRefreshing {
+                    ProgressView()
+                } else {
+                    VStack(spacing: 6) {
+                        Image(systemName: "rectangle.dashed")
+                            .font(.title2)
+                        Text("Choose a source to verify what the scanner sees.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(height: 165)
+
+            Label(
+                liveCapture.isCollectionScreenDetected ? "Sprite Collection detected" : "Waiting for Sprite Collection",
+                systemImage: liveCapture.isCollectionScreenDetected ? "checkmark.seal.fill" : "scope"
+            )
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(liveCapture.isCollectionScreenDetected ? .green : .secondary)
+        }
+        .cardStyle()
     }
 
     @ViewBuilder
     private var resultsCard: some View {
         if !liveCapture.latestDetections.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 9) {
                 HStack {
-                    Text("Latest Stable View").font(.headline)
+                    Text("Recognized in Latest View")
+                        .font(.headline)
                     Spacer()
-                    Text("\(liveCapture.latestDetections.count) unlocked")
+                    Text("\(liveCapture.latestDetections.count)")
                         .font(.caption.monospacedDigit().weight(.black))
                         .foregroundStyle(.secondary)
                 }
 
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 7)], spacing: 7) {
                     ForEach(liveCapture.latestDetections) { result in
-                        HStack(spacing: 8) {
+                        HStack(spacing: 7) {
                             Image(systemName: result.status == .lost ? "clock.arrow.circlepath" : result.mastered ? "crown.fill" : "checkmark.circle.fill")
                                 .foregroundStyle(result.status == .lost ? .orange : result.mastered ? .yellow : .green)
                             Text(result.name)
                                 .font(.caption.weight(.semibold))
-                                .lineLimit(1)
-                            Spacer()
-                            Text(result.mastered ? "Lvl 5" : result.level.map { "Lvl \($0)" } ?? "Unlocked")
+                                .lineLimit(nil)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 4)
+                            Text(result.level.map { "Lvl \($0)" } ?? "Owned")
                                 .font(.caption2.monospacedDigit().weight(.black))
                                 .foregroundStyle(.secondary)
                         }
-                        .padding(9)
-                        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+                        .padding(8)
+                        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 9))
                     }
                 }
             }
-            .padding(16)
-            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.08)))
+            .cardStyle()
         }
+    }
+
+    private var permissionsDisclosure: some View {
+        DisclosureGroup(isExpanded: $showPermissions) {
+            VStack(spacing: 0) {
+                permissionRow(
+                    title: "Screen Recording",
+                    detail: "Required for screen/window capture.",
+                    granted: liveCapture.screenRecordingGranted,
+                    buttonTitle: "Enable"
+                ) { liveCapture.requestScreenRecordingPermission() }
+
+                Divider()
+
+                permissionRow(
+                    title: "Accessibility",
+                    detail: "Required for the global \(liveCapture.shortcutText) shortcut.",
+                    granted: liveCapture.accessibilityGranted,
+                    buttonTitle: "Enable"
+                ) { liveCapture.requestAccessibilityPermission() }
+
+                Divider()
+
+                permissionRow(
+                    title: "Capture Device",
+                    detail: "Only needed for USB video devices.",
+                    granted: liveCapture.captureDeviceGranted,
+                    buttonTitle: "Enable"
+                ) { liveCapture.requestCaptureDevicePermission() }
+
+                Divider()
+
+                permissionRow(
+                    title: "Notifications",
+                    detail: "Optional scan completion alerts.",
+                    granted: liveCapture.notificationsGranted,
+                    buttonTitle: "Enable"
+                ) { liveCapture.requestNotificationPermission() }
+            }
+            .padding(.top, 10)
+        } label: {
+            HStack {
+                Text("Permissions")
+                    .font(.headline)
+                Spacer()
+                Text(permissionSummary)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .cardStyle()
+    }
+
+    private var permissionSummary: String {
+        var ready = 0
+        if liveCapture.screenRecordingGranted { ready += 1 }
+        if liveCapture.accessibilityGranted { ready += 1 }
+        if liveCapture.captureDeviceGranted { ready += 1 }
+        if liveCapture.notificationsGranted { ready += 1 }
+        return "\(ready)/4 ready"
     }
 
     private func metric(_ title: String, _ value: String, symbol: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Label(title, systemImage: symbol)
+            Label(title.uppercased(), systemImage: symbol)
                 .font(.system(size: 8, weight: .black, design: .rounded))
                 .foregroundStyle(.secondary)
             Text(value)
                 .font(.caption.monospacedDigit().weight(.bold))
-                .lineLimit(1)
+                .lineLimit(nil)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private func permissionRow(
@@ -485,34 +427,28 @@ struct LiveCaptureSheet: View {
         buttonTitle: String,
         action: @escaping () -> Void
     ) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                 .foregroundStyle(granted ? .green : .orange)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.weight(.bold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(nil)
             }
             Spacer()
             if granted {
-                Text("Ready").font(.caption.weight(.bold)).foregroundStyle(.green)
+                Text("Ready")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.green)
             } else {
-                Button(buttonTitle, action: action).buttonStyle(.bordered)
+                Button(buttonTitle, action: action)
+                    .buttonStyle(.bordered)
             }
         }
-    }
-
-    private var applicationSelection: Binding<String> {
-        Binding(
-            get: { liveCapture.selectedApplicationID ?? "" },
-            set: { liveCapture.selectedApplicationID = $0.isEmpty ? nil : $0 }
-        )
-    }
-
-    private var windowSelection: Binding<CGWindowID> {
-        Binding(
-            get: { liveCapture.selectedWindowID ?? 0 },
-            set: { liveCapture.selectedWindowID = $0 == 0 ? nil : $0 }
-        )
+        .padding(.vertical, 8)
     }
 
     private var captureDeviceSelection: Binding<String> {
@@ -527,5 +463,14 @@ struct LiveCaptureSheet: View {
             get: { liveCapture.targetProfileID ?? store.selectedProfileID },
             set: { liveCapture.targetProfileID = $0 }
         )
+    }
+}
+
+private extension View {
+    func cardStyle() -> some View {
+        self
+            .padding(14)
+            .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.07)))
     }
 }

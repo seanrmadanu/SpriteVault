@@ -17,13 +17,12 @@ On first use, open **Live Capture** and grant the permissions needed by the capt
 
 ## Capture sources
 
-Live Capture now has three source modes:
+Live Capture now has two user-facing source modes:
 
-1. **Application** — choose OBS Studio, PS Remote Play, GeForce NOW, a browser, Chiaki, etc. Sprite Vault examines all shareable windows belonging to that app and automatically prefers gameplay/projector/preview-style windows. A live preview shows exactly what it selected.
-2. **Specific Window** — manual fallback when an app has several windows and you want exact control.
-3. **Capture Device** — reads a USB/UVC video capture device directly through AVFoundation, bypassing OBS entirely.
+1. **Screen / Window** — recommended. Press **Select Window / Screen** and use Apple's ScreenCaptureKit picker to choose the full-screen Fortnite window, OBS Projector, or an entire display. This works across macOS Spaces and avoids trying to draw Sprite Vault's own selection overlay on top of another app's full-screen Space. A secondary **Custom Area** button remains for windowed setups and stores the selected `sourceRect` for reuse.
+2. **Capture Device** — reads a USB/UVC video capture device directly through AVFoundation, bypassing OBS entirely.
 
-Imported screenshots and recordings continue to work independently of Live Capture.
+Recognition is calibrated against the full Fortnite viewport. If you use Custom Area, select the complete 16:9 Fortnite image rather than only the Sprite cards.
 
 ## Hotkey scan
 
@@ -103,7 +102,11 @@ The **Live Capture** toolbar button becomes a live status capsule while a hotkey
 
 ## Sprite card hover
 
-The old detached hover tooltip has been removed. Hovering now makes the Sprite card itself rise and expand above the grid with a Fortnite-inspired spring/light-sweep animation. The expanded card shows the gameplay description, variant perk when known, ownership/lost state, level, and mastery directly under the Sprite name.
+Hovering keeps the Sprite card centered on its original grid position and expands it in every direction. The hover card uses a high stacking order so neighboring cards do not cover it. Expensive perpetual light-sweep/card-float effects were removed to keep scrolling smooth. Sprite names, gameplay descriptions, variant perks, and scan result text wrap to full lines instead of being shortened with ellipses.
+
+## Batch screenshot import
+
+Screenshot import accepts multiple images in one Finder selection. Additional screenshots can be appended to the same batch, each image is analyzed independently, unreadable screenshots do not abort the rest of the batch, and duplicate Sprite detections are merged before review. Repeated detections increase the evidence count; higher confirmed levels and Mastered status are preserved. Video import remains one recording at a time.
 
 ## Profiles, search, filters, compare, and PDF
 

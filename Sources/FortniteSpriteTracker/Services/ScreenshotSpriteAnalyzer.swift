@@ -50,8 +50,16 @@ actor ScreenshotSpriteAnalyzer {
         try Task.checkCancellation()
         let viewport = contentViewport(in: screenshot)
 
-        onProgress(0.03, "Checking for Sprites → Collection…")
-        guard try isCollectionScreen(screenshot, viewport: viewport) else {
+        // Do not make one fragile OCR crop the gatekeeper for the entire scan.
+        // The header, right details panel, and several visible level labels are
+        // independent pieces of evidence that this is the Sprite Collection.
+        onProgress(0.03, "Calibrating the Fortnite collection layout…")
+        let headerConfirmed = try isCollectionScreen(screenshot, viewport: viewport)
+        let detail = try recognizedRightPanel(in: screenshot, viewport: viewport)
+        let levelsBySlot = try recognizedGridLevels(in: screenshot, viewport: viewport)
+
+        let collectionConfirmed = headerConfirmed || detail != nil || levelsBySlot.count >= 2
+        guard collectionConfirmed else {
             onProgress(1.0, "Waiting for the Fortnite Sprites Collection screen…")
             return SpriteFrameAnalysis(
                 detections: [],
@@ -63,15 +71,9 @@ actor ScreenshotSpriteAnalyzer {
             )
         }
 
-        // The right panel gives an exact identity for the selected Sprite and is
-        // particularly valuable for a Sprite that was lost in a past match,
-        // because Fortnite keeps it visible but greys out its grid card.
-        let detail = try recognizedRightPanel(in: screenshot, viewport: viewport)
-
         var cards: [CardFeature] = []
         var selectionCandidates: [(slot: Int, score: Double)] = []
-        var readableSlots = Set<Int>()
-        onProgress(0.08, "Reading the visible Sprite cards…")
+        onProgress(0.16, "Matching the visible Sprite cards…")
 
         for slot in 0..<12 {
             try Task.checkCancellation()
@@ -79,11 +81,11 @@ actor ScreenshotSpriteAnalyzer {
             guard let card = cropTopLeft(screenshot, to: rect) else { continue }
             selectionCandidates.append((slot, selectionScore(in: card)))
 
-            let progress = 0.08 + (Double(slot + 1) / 12.0) * 0.36
-            guard let level = try recognizedLevel(in: card) else {
-                if slot.isMultiple(of: 3) {
-                    onProgress(progress, "Waiting for a stable grid; checking levels…")
-                }
+            let level = levelsBySlot[slot]
+            // Level text is the strongest ownership marker, but Vision can miss a
+            // tiny label. A clearly visible/colorful card is still allowed through
+            // so artwork recognition remains the primary collection scanner.
+            guard level != nil || unlockedVisualScore(in: card) >= 0.28 else {
                 continue
             }
 
@@ -92,9 +94,7 @@ actor ScreenshotSpriteAnalyzer {
                 continue
             }
 
-            readableSlots.insert(slot)
             cards.append(CardFeature(slot: slot, level: level, feature: feature))
-            onProgress(progress, "Found visible card · Lvl \(level)")
         }
 
         var detections: [DetectedSprite] = []
@@ -138,10 +138,13 @@ actor ScreenshotSpriteAnalyzer {
         }
 
         var selectedSpriteName: String?
-        if let detail,
-           let selectedSlot = bestSelectedSlot(selectionCandidates) {
+        if let detail {
+            // Right-panel OCR is an independent fallback. Do not throw away a
+            // perfectly readable Sprite name just because the selected-card
+            // highlight could not be located in the left grid. That was one of
+            // the reasons live recognition could appear to do nothing.
+            let selectedSlot = bestSelectedSlot(selectionCandidates)
             selectedSpriteName = detail.item.name
-            readableSlots.insert(selectedSlot)
 
             let catalogIndex = catalog.firstIndex(where: {
                 normalize($0.name) == normalize(detail.item.name)
@@ -159,8 +162,15 @@ actor ScreenshotSpriteAnalyzer {
             )
 
             // The right-side title is stronger evidence than artwork matching.
-            // Replace an uncertain visual match occupying the selected card.
-            detections.removeAll { $0.gridSlot == selectedSlot || normalize($0.name) == normalize(detail.item.name) }
+            // Replace an uncertain visual match occupying the selected card when
+            // we know the slot; otherwise still merge it by catalog identity.
+            if let selectedSlot {
+                detections.removeAll {
+                    $0.gridSlot == selectedSlot || normalize($0.name) == normalize(detail.item.name)
+                }
+            } else {
+                detections.removeAll { normalize($0.name) == normalize(detail.item.name) }
+            }
             detections.append(selectedDetection)
         }
 
@@ -260,22 +270,23 @@ actor ScreenshotSpriteAnalyzer {
     }
 
     private func recognizedRightPanel(in screenshot: CGImage, viewport: CGRect) throws -> DetailPanelMatch? {
+        // Deliberately broad. Full-screen, OBS projector, Remote Play, and capture
+        // cards can move the detail block a little while keeping the same 16:9 UI.
         let rect = CGRect(
-            x: viewport.minX + viewport.width * 0.60,
-            y: viewport.minY + viewport.height * 0.43,
-            width: viewport.width * 0.36,
-            height: viewport.height * 0.34
+            x: viewport.minX + viewport.width * 0.52,
+            y: viewport.minY + viewport.height * 0.31,
+            width: viewport.width * 0.46,
+            height: viewport.height * 0.50
         )
-        guard let panel = cropTopLeft(screenshot, to: rect) else { return nil }
+        guard let rawPanel = cropTopLeft(screenshot, to: rect),
+              let panel = preparedTextImage(rawPanel, targetWidth: 980) else { return nil }
 
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
         request.recognitionLanguages = ["en-US"]
-        request.minimumTextHeight = 0.025
-        request.customWords = catalog.flatMap { [$0.name, "\($0.name) Sprite"] }
-            + ["SPRITE MASTERED", "LOST IN PAST MATCH"]
-            + (1...5).flatMap { ["Lvl \($0)", "Level \($0)"] }
+        request.minimumTextHeight = 0.020
+        request.customWords = recognitionWords
 
         let handler = VNImageRequestHandler(cgImage: panel, options: [:])
         try handler.perform([request])
@@ -286,22 +297,22 @@ actor ScreenshotSpriteAnalyzer {
         guard !strings.isEmpty else { return nil }
 
         let canonical = strings.map(canonicalOCRText)
-        let joined = canonical.joined(separator: " ")
+        let joined = canonical.joined(separator: "")
         let isLost = joined.contains("lostinpastmatch") || (joined.contains("lost") && joined.contains("pastmatch"))
         let mastered = joined.contains("spritemastered") || (joined.contains("sprite") && joined.contains("mastered"))
 
-        let matchedItem = catalogByLongestName.first { item in
-            let key = normalize(item.name)
-            return canonical.contains(where: { line in
-                line.contains(key + "sprite") || line == key || line.contains(key)
-            })
-        }
-        guard let item = matchedItem else { return nil }
+        // Joining all OCR fragments handles Fortnite titles that wrap onto two
+        // rows, while longest-name-first matching prevents variants collapsing
+        // into their base Sprite (for example Holofoil Batman -> Batman).
+        let item = catalogByLongestName.first { candidate in
+            let key = normalize(candidate.name)
+            return joined.contains(key + "sprite") || joined.contains(key)
+        } ?? bestFuzzyCatalogMatch(in: canonical)
 
-        var level: Int?
-        if mastered {
-            level = 5
-        } else {
+        guard let item else { return nil }
+
+        var level: Int? = mastered ? 5 : nil
+        if level == nil {
             for string in strings {
                 if let parsed = parseLevel(string) {
                     level = parsed
@@ -313,34 +324,46 @@ actor ScreenshotSpriteAnalyzer {
         return DetailPanelMatch(item: item, level: level, mastered: mastered, isLost: isLost)
     }
 
-    private func recognizedLevel(in card: CGImage) throws -> Int? {
-        let width = CGFloat(card.width)
-        let height = CGFloat(card.height)
-        let levelRect = CGRect(
-            x: width * 0.01,
-            y: height * 0.70,
-            width: width * 0.68,
-            height: height * 0.29
-        )
-        guard let levelImage = cropTopLeft(card, to: levelRect) else { return nil }
+    /// One OCR request for all twelve cards instead of twelve independent Vision
+    /// requests. The observations are mapped back onto the regular 3x4 grid.
+    private func recognizedGridLevels(in screenshot: CGImage, viewport: CGRect) throws -> [Int: Int] {
+        let rects = (0..<12).map { cardRect(for: $0, viewport: viewport) }
+        guard var gridRect = rects.first else { return [:] }
+        for rect in rects.dropFirst() { gridRect = gridRect.union(rect) }
+        gridRect = gridRect.insetBy(dx: -viewport.width * 0.008, dy: -viewport.height * 0.010)
+
+        guard let rawGrid = cropTopLeft(screenshot, to: gridRect),
+              let grid = preparedTextImage(rawGrid, targetWidth: 1050) else { return [:] }
 
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
-        request.minimumTextHeight = 0.10
+        request.minimumTextHeight = 0.018
         request.customWords = (1...5).flatMap { ["Lvl \($0)", "Level \($0)"] }
 
-        let handler = VNImageRequestHandler(cgImage: levelImage, options: [:])
+        let handler = VNImageRequestHandler(cgImage: grid, options: [:])
         try handler.perform([request])
 
+        var result: [Int: Int] = [:]
         for observation in request.results ?? [] {
-            for candidate in observation.topCandidates(3) {
-                if let level = parseLevel(candidate.string) {
-                    return level
-                }
+            guard let level = observation.topCandidates(3).compactMap({ parseLevel($0.string) }).first else {
+                continue
+            }
+
+            let point = CGPoint(
+                x: gridRect.minX + observation.boundingBox.midX * gridRect.width,
+                y: gridRect.minY + (1 - observation.boundingBox.midY) * gridRect.height
+            )
+
+            let slot = rects.enumerated().min { lhs, rhs in
+                distanceSquared(point, CGPoint(x: lhs.element.midX, y: lhs.element.midY)) < distanceSquared(point, CGPoint(x: rhs.element.midX, y: rhs.element.midY))
+            }?.offset
+
+            if let slot, rects[slot].insetBy(dx: -rects[slot].width * 0.25, dy: -rects[slot].height * 0.20).contains(point) {
+                result[slot] = max(result[slot] ?? 0, level)
             }
         }
-        return nil
+        return result
     }
 
     private func parseLevel(_ value: String) -> Int? {
@@ -366,6 +389,103 @@ actor ScreenshotSpriteAnalyzer {
             }
         }
         return nil
+    }
+
+    private var recognitionWords: [String] {
+        var words = catalog.flatMap { [$0.name, "\($0.name) Sprite"] }
+        for item in catalog where item.name.contains("Llama") {
+            let alias = item.name.replacingOccurrences(of: "Llama", with: "Lootin' Llama")
+            words.append(alias)
+            words.append("\(alias) Sprite")
+        }
+        words += ["SPRITE MASTERED", "LOST IN PAST MATCH"]
+        words += SpriteRarity.allCases.map(\.rawValue)
+        words += (1...5).flatMap { ["Lvl \($0)", "Level \($0)"] }
+        return words
+    }
+
+    private func bestFuzzyCatalogMatch(in canonicalLines: [String]) -> SpriteItem? {
+        var best: (item: SpriteItem, distance: Int)?
+        var secondDistance = Int.max
+
+        for line in canonicalLines {
+            let target = line
+                .replacingOccurrences(of: "mastered", with: "")
+                .replacingOccurrences(of: "sprite", with: "")
+            guard target.count >= 4 else { continue }
+
+            let ranked = catalog.map { item in
+                (item: item, distance: editDistance(target, normalize(item.name)))
+            }.sorted { $0.distance < $1.distance }
+            guard let candidate = ranked.first else { continue }
+            let runner = ranked.dropFirst().first?.distance ?? Int.max
+            if best == nil || candidate.distance < best!.distance {
+                best = candidate
+                secondDistance = runner
+            }
+        }
+
+        guard let best else { return nil }
+        let allowance = normalize(best.item.name).count >= 10 ? 2 : 1
+        guard best.distance <= allowance, secondDistance > best.distance else { return nil }
+        return best.item
+    }
+
+    private func editDistance(_ lhs: String, _ rhs: String) -> Int {
+        let left = Array(lhs)
+        let right = Array(rhs)
+        var previous = Array(0...right.count)
+        for (leftIndex, leftCharacter) in left.enumerated() {
+            var current = [leftIndex + 1]
+            for (rightIndex, rightCharacter) in right.enumerated() {
+                current.append(min(
+                    current[rightIndex] + 1,
+                    previous[rightIndex + 1] + 1,
+                    previous[rightIndex] + (leftCharacter == rightCharacter ? 0 : 1)
+                ))
+            }
+            previous = current
+        }
+        return previous.last ?? 0
+    }
+
+    private func preparedTextImage(_ image: CGImage, targetWidth: CGFloat) -> CGImage? {
+        let source = CIImage(cgImage: image)
+            .applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: 0,
+                kCIInputContrastKey: 1.35,
+                kCIInputBrightnessKey: 0.02
+            ])
+            .applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: 0.45])
+
+        let scale = max(1, targetWidth / max(source.extent.width, 1))
+        let scaled = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        return ciContext.createCGImage(scaled, from: scaled.extent)
+    }
+
+    private func unlockedVisualScore(in image: CGImage) -> Double {
+        guard let pixels = downsampleRGBA(image, width: 20, height: 20) else { return 0 }
+        var visible = 0
+        var samples = 0
+        for y in 2..<18 {
+            for x in 2..<18 {
+                let i = (y * 20 + x) * 4
+                let r = Int(pixels[i])
+                let g = Int(pixels[i + 1])
+                let b = Int(pixels[i + 2])
+                let maxC = max(r, max(g, b))
+                let minC = min(r, min(g, b))
+                if maxC > 78 && (maxC - minC > 22 || maxC > 155) { visible += 1 }
+                samples += 1
+            }
+        }
+        return samples > 0 ? Double(visible) / Double(samples) : 0
+    }
+
+    private func distanceSquared(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+        let dx = lhs.x - rhs.x
+        let dy = lhs.y - rhs.y
+        return dx * dx + dy * dy
     }
 
     private func artworkCrop(from card: CGImage) -> CGImage? {
@@ -684,7 +804,7 @@ actor ScreenshotSpriteAnalyzer {
 
 private struct CardFeature {
     let slot: Int
-    let level: Int
+    let level: Int?
     let feature: VNFeaturePrintObservation
 }
 
