@@ -233,12 +233,13 @@ struct LiveCaptureSheet: View {
                     Button {
                         Task { await liveCapture.refreshPreview() }
                     } label: {
-                        Label("Refresh Preview", systemImage: "eye")
+                        Label(liveCapture.isPreviewRefreshing ? "Loading…" : "Refresh Preview", systemImage: "eye")
                     }
+                    .disabled(liveCapture.isPreviewRefreshing)
                 }
             }
 
-            ZStack {
+            ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 14)
                     .fill(.black.opacity(0.48))
 
@@ -248,16 +249,37 @@ struct LiveCaptureSheet: View {
                         .scaledToFit()
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .padding(6)
+
+                    if let source = liveCapture.previewSourceLabel {
+                        Label(source, systemImage: "viewfinder")
+                            .font(.caption2.weight(.bold))
+                            .lineLimit(1)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .background(.black.opacity(0.72), in: Capsule())
+                            .overlay(Capsule().stroke(.white.opacity(0.16)))
+                            .padding(12)
+                    }
+                } else if liveCapture.isPreviewRefreshing {
+                    VStack(spacing: 9) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Locking preview to the selected source…")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     VStack(spacing: 8) {
                         Image(systemName: "rectangle.dashed.and.paperclip")
                             .font(.system(size: 28, weight: .bold))
                         Text(liveCapture.sourceMode == .captureDevice
                              ? "Start a scan to see the live capture-device preview."
-                             : "Refresh the preview to verify the correct game window.")
+                             : "Refresh the preview to verify the exact selected window.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .frame(height: 210)

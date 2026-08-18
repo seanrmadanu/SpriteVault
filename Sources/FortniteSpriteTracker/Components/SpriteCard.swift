@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct SpriteCard: View {
     let item: SpriteItem
@@ -10,30 +11,44 @@ struct SpriteCard: View {
     @State private var hovered = false
     @State private var burst = false
     @State private var sweep = false
+    @State private var collapseTask: Task<Void, Never>?
+
+    private let normalHeight: CGFloat = 286
+    private let expandedWidth: CGFloat = 330
+    private let expandedHeight: CGFloat = 500
 
     var body: some View {
-        ZStack(alignment: .top) {
-            cardContent(expanded: false)
-                .opacity(hovered ? 0 : 1)
+        GeometryReader { geometry in
+            ZStack(alignment: .top) {
+                compactCard
+                    .opacity(hovered ? 0.18 : 1)
 
-            if hovered {
-                cardContent(expanded: true)
-                    .frame(height: 365, alignment: .top)
-                    .scaleEffect(1.065, anchor: .top)
-                    .offset(y: -12)
-                    .transition(
-                        .asymmetric(
-                            insertion: .scale(scale: 0.92, anchor: .top)
-                                .combined(with: .opacity),
-                            removal: .scale(scale: 0.97, anchor: .top)
-                                .combined(with: .opacity)
+                if hovered {
+                    expandedCard
+                        .frame(width: expandedWidth, height: expandedHeight, alignment: .top)
+                        .offset(x: horizontalCorrection(for: geometry), y: -18)
+                        .transition(
+                            .asymmetric(
+                                insertion: .scale(scale: 0.88, anchor: .top)
+                                    .combined(with: .opacity),
+                                removal: .scale(scale: 0.96, anchor: .top)
+                                    .combined(with: .opacity)
+                            )
                         )
-                    )
+                        .onHover { inside in
+                            if inside {
+                                keepExpanded()
+                            } else {
+                                scheduleCollapse()
+                            }
+                        }
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .frame(height: 286, alignment: .top)
-        .zIndex(hovered ? 100 : highlighted ? 80 : 0)
-        .shadow(color: .black.opacity(hovered ? 0.48 : 0.18), radius: hovered ? 26 : 7, y: hovered ? 15 : 5)
+        .frame(height: normalHeight)
+        .zIndex(hovered ? 500 : highlighted ? 80 : 0)
+        .shadow(color: .black.opacity(hovered ? 0.62 : 0.18), radius: hovered ? 34 : 7, y: hovered ? 18 : 5)
         .overlay {
             if burst {
                 Image(systemName: "sparkles")
@@ -43,29 +58,26 @@ struct SpriteCard: View {
                     .allowsHitTesting(false)
             }
         }
+        .contentShape(Rectangle())
         .onHover { inside in
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.72, blendDuration: 0.08)) {
-                hovered = inside
-                if inside { sweep.toggle() }
+            if inside {
+                keepExpanded()
+            } else {
+                scheduleCollapse()
             }
+        }
+        .onDisappear {
+            collapseTask?.cancel()
         }
     }
 
-    @ViewBuilder
-    private func cardContent(expanded: Bool) -> some View {
-        VStack(alignment: .leading, spacing: expanded ? 8 : 10) {
-            imagePanel(expanded: expanded)
+    private var compactCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            imagePanel(height: 154, imageScale: 1)
 
             HStack(spacing: 8) {
                 rarityBadge
-                if item.isLost {
-                    Text("LOST")
-                        .font(.system(size: 8, weight: .black, design: .rounded))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 4)
-                        .background(.orange.opacity(0.18), in: Capsule())
-                        .foregroundStyle(.orange)
-                }
+                if item.isLost { lostBadge }
                 Spacer()
                 statusIcon
             }
@@ -75,117 +87,136 @@ struct SpriteCard: View {
                 .lineLimit(2)
                 .minimumScaleFactor(0.78)
 
-            if expanded {
-                Text(item.gameplayDescription)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.80))
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-
-                if let variantBonus = item.variantBonusDescription {
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "sparkles")
-                            .foregroundStyle(.yellow)
-                        Text(variantBonus)
-                            .font(.system(size: 9.5, weight: .bold))
-                            .foregroundStyle(.yellow.opacity(0.92))
-                            .lineLimit(2)
-                    }
-                }
-
-                HStack(spacing: 6) {
-                    infoChip(statusLabel, symbol: statusSymbol, highlighted: item.mastered)
-                    if let level = item.level {
-                        infoChip("LVL \(level)", symbol: "bolt.fill")
-                    }
-                    if item.mastered {
-                        infoChip("MASTERED", symbol: "crown.fill", highlighted: true)
-                    }
-                }
-            }
-
             controls
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .frame(height: expanded ? 365 : 286, alignment: .top)
-        .background(cardBackground(expanded: expanded))
-        .overlay(alignment: .topLeading) {
-            if expanded {
-                Rectangle()
-                    .fill(.yellow)
-                    .frame(width: 92, height: 3)
-                    .padding(.leading, 16)
-                    .overlay {
-                        GeometryReader { geometry in
-                            Rectangle()
-                                .fill(
-                                    LinearGradient(
-                                        colors: [.clear, .white.opacity(0.18), .clear],
-                                        startPoint: .leading,
-                                        endPoint: .trailing
-                                    )
-                                )
-                                .frame(width: 42, height: geometry.size.height * 2)
-                                .rotationEffect(.degrees(14))
-                                .offset(x: sweep ? geometry.size.width + 30 : -70, y: -20)
-                                .animation(.easeOut(duration: 0.62), value: sweep)
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        .allowsHitTesting(false)
-                    }
-            }
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(
-                    highlighted ? Color.yellow.opacity(0.95) : Color.white.opacity(expanded ? 0.24 : 0.08),
-                    lineWidth: highlighted ? 2.4 : expanded ? 1.5 : 1
-                )
-                .shadow(color: highlighted ? .yellow.opacity(0.35) : .clear, radius: 12)
-        }
+        .frame(height: normalHeight, alignment: .top)
+        .background(cardBackground)
+        .overlay(cardBorder(expanded: false))
     }
 
-    private func imagePanel(expanded: Bool) -> some View {
+    /// The hover state is intentionally a complete, larger version of the card
+    /// rather than a detached tooltip. It floats above the grid without changing
+    /// neighboring card positions, matching the Fortnite "selected item" feel.
+    private var expandedCard: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            imagePanel(height: 230, imageScale: 1.08)
+
+            HStack(spacing: 8) {
+                rarityBadge
+                if item.isLost { lostBadge }
+                Spacer()
+                statusIcon
+            }
+
+            Text(item.name)
+                .font(.system(size: 22, weight: .black, design: .rounded))
+                .lineLimit(2)
+                .minimumScaleFactor(0.82)
+
+            Text(item.gameplayDescription)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.86))
+                .lineLimit(4)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let variantBonus = item.variantBonusDescription {
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 13, weight: .black))
+                        .foregroundStyle(.yellow)
+                    Text(variantBonus)
+                        .font(.system(size: 12, weight: .black))
+                        .foregroundStyle(.yellow.opacity(0.95))
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack(spacing: 7) {
+                infoChip(statusLabel, symbol: statusSymbol, highlighted: item.mastered)
+                if let level = item.level {
+                    infoChip("LVL \(level)", symbol: "bolt.fill")
+                }
+                if item.mastered {
+                    infoChip("MASTERED", symbol: "crown.fill", highlighted: true)
+                }
+            }
+
+            Spacer(minLength: 0)
+            controls
+        }
+        .padding(14)
+        .frame(width: expandedWidth, height: expandedHeight, alignment: .topLeading)
+        .background(cardBackground)
+        .overlay(alignment: .topLeading) {
+            Rectangle()
+                .fill(.yellow)
+                .frame(width: 130, height: 4)
+                .padding(.leading, 20)
+                .overlay {
+                    GeometryReader { geometry in
+                        Rectangle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [.clear, .white.opacity(0.26), .clear],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: 58, height: geometry.size.height * 2)
+                            .rotationEffect(.degrees(14))
+                            .offset(x: sweep ? geometry.size.width + 35 : -80, y: -20)
+                            .animation(.easeOut(duration: 0.7), value: sweep)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    .allowsHitTesting(false)
+                }
+        }
+        .overlay(cardBorder(expanded: true))
+        .shadow(color: .yellow.opacity(0.08), radius: 26)
+    }
+
+    private func imagePanel(height: CGFloat, imageScale: CGFloat) -> some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(spriteBackdrop)
 
             Circle()
                 .fill(
                     RadialGradient(
-                        colors: [.white.opacity(expanded ? 0.15 : 0.07), .clear],
+                        colors: [.white.opacity(0.14), .clear],
                         center: .center,
                         startRadius: 0,
-                        endRadius: 74
+                        endRadius: height * 0.55
                     )
                 )
-                .frame(width: 148, height: 148)
+                .frame(width: height * 0.95, height: height * 0.95)
 
             CachedSpriteImage(assetName: item.imageAssetName, accessibilityLabel: item.name)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(8)
-                .scaleEffect(expanded ? 1.10 : 1)
-                .rotationEffect(.degrees(expanded ? -1.5 : 0))
+                .padding(height > 200 ? 14 : 8)
+                .scaleEffect(imageScale)
+                .rotationEffect(.degrees(hovered ? -1.2 : 0))
                 .saturation(item.isLost ? 0.05 : item.isLocked ? 0.25 : 1)
                 .opacity(item.isLost ? 0.58 : item.isLocked ? 0.42 : 1)
-                .animation(.spring(response: 0.34, dampingFraction: 0.68), value: expanded)
+                .animation(.spring(response: 0.36, dampingFraction: 0.72), value: hovered)
 
             if item.isLocked {
                 Image(systemName: "lock.fill")
-                    .font(.system(size: 30, weight: .black))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .font(.system(size: height > 200 ? 42 : 30, weight: .black))
+                    .foregroundStyle(.white.opacity(0.74))
             }
         }
-        .frame(height: expanded ? 147 : 154)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .frame(height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.white.opacity(expanded ? 0.20 : 0.07), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(hovered ? 0.19 : 0.07), lineWidth: 1)
         }
         .overlay(alignment: .topTrailing) {
-            levelBadge.padding(8)
+            levelBadge.padding(10)
         }
     }
 
@@ -196,17 +227,17 @@ struct SpriteCard: View {
                 Image(systemName: "crown.fill")
                 Text("LVL 5")
             }
-            .font(.system(size: 9, weight: .black, design: .rounded))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(.yellow.opacity(0.92), in: Capsule())
+            .font(.system(size: 10, weight: .black, design: .rounded))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(.yellow.opacity(0.94), in: Capsule())
             .foregroundStyle(.black)
         } else if let level = item.level {
             Text("LVL \(level)")
-                .font(.system(size: 9, weight: .black, design: .rounded))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(.white.opacity(0.88), in: Capsule())
+                .font(.system(size: 10, weight: .black, design: .rounded))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(.white.opacity(0.9), in: Capsule())
                 .foregroundStyle(.black)
         }
     }
@@ -244,11 +275,11 @@ struct SpriteCard: View {
             } label: {
                 Image(systemName: levelControlSymbol)
                     .foregroundStyle(item.mastered ? Color.yellow : Color.primary)
-                    .frame(width: 24, height: 20)
+                    .frame(width: 26, height: 22)
             }
             .menuStyle(.borderlessButton)
-            .frame(width: 48, height: 28)
-            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+            .frame(width: 50, height: 30)
+            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
         }
     }
 
@@ -274,13 +305,22 @@ struct SpriteCard: View {
             .background(.white.opacity(0.12), in: Capsule())
     }
 
-    private func infoChip(_ title: String, symbol: String, highlighted: Bool = false) -> some View {
-        Label(title, systemImage: symbol)
+    private var lostBadge: some View {
+        Text("LOST")
             .font(.system(size: 8, weight: .black, design: .rounded))
             .padding(.horizontal, 7)
             .padding(.vertical, 4)
+            .background(.orange.opacity(0.18), in: Capsule())
+            .foregroundStyle(.orange)
+    }
+
+    private func infoChip(_ title: String, symbol: String, highlighted: Bool = false) -> some View {
+        Label(title, systemImage: symbol)
+            .font(.system(size: 8.5, weight: .black, design: .rounded))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
             .background(highlighted ? Color.yellow.opacity(0.9) : Color.white.opacity(0.10), in: Capsule())
-            .foregroundStyle(highlighted ? Color.black : Color.white.opacity(0.9))
+            .foregroundStyle(highlighted ? Color.black : Color.white.opacity(0.92))
     }
 
     private var ownedButtonTitle: String {
@@ -313,17 +353,66 @@ struct SpriteCard: View {
         return "slider.horizontal.3"
     }
 
-    private func cardBackground(expanded: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 20, style: .continuous)
-            .fill(Color(red: 0.115, green: 0.115, blue: 0.125).opacity(0.985))
+    private var cardBackground: some View {
+        RoundedRectangle(cornerRadius: hovered ? 24 : 20, style: .continuous)
+            .fill(Color(red: 0.115, green: 0.115, blue: 0.125).opacity(0.992))
             .overlay {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                RoundedRectangle(cornerRadius: hovered ? 24 : 20, style: .continuous)
                     .fill(
                         item.mastered ? Color.yellow.opacity(0.075) :
                         item.isLost ? Color.orange.opacity(0.05) :
                         item.owned ? Color.green.opacity(0.04) : Color.clear
                     )
             }
+    }
+
+    private func cardBorder(expanded: Bool) -> some View {
+        RoundedRectangle(cornerRadius: expanded ? 24 : 20, style: .continuous)
+            .stroke(
+                highlighted ? Color.yellow.opacity(0.95) : Color.white.opacity(expanded ? 0.26 : 0.08),
+                lineWidth: highlighted ? 2.4 : expanded ? 1.6 : 1
+            )
+            .shadow(color: highlighted ? .yellow.opacity(0.35) : .clear, radius: 12)
+    }
+
+    private func keepExpanded() {
+        collapseTask?.cancel()
+        collapseTask = nil
+        guard !hovered else { return }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.74, blendDuration: 0.08)) {
+            hovered = true
+            sweep.toggle()
+        }
+    }
+
+    private func scheduleCollapse() {
+        collapseTask?.cancel()
+        collapseTask = Task {
+            try? await Task.sleep(for: .milliseconds(130))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                    hovered = false
+                }
+            }
+        }
+    }
+
+    /// Keep the expanded card inside the main window at the left/right edges.
+    private func horizontalCorrection(for geometry: GeometryProxy) -> CGFloat {
+        let cardFrame = geometry.frame(in: .global)
+        let windowWidth = NSApp.keyWindow?.contentView?.bounds.width ?? 1200
+        let margin: CGFloat = 16
+        let desiredLeft = cardFrame.midX - expandedWidth / 2
+        let desiredRight = cardFrame.midX + expandedWidth / 2
+
+        if desiredLeft < margin {
+            return margin - desiredLeft
+        }
+        if desiredRight > windowWidth - margin {
+            return (windowWidth - margin) - desiredRight
+        }
+        return 0
     }
 
     private var spriteBackdrop: LinearGradient {

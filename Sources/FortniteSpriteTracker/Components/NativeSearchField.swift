@@ -1,8 +1,9 @@
 import SwiftUI
 import AppKit
 
-/// Native macOS search field with explicit first-responder handling.
-/// This avoids the focus issue the previous SwiftUI/hidden-title-bar setup had.
+/// Native macOS search field with explicit first-responder handling and a
+/// high-contrast dark appearance. The native field is kept because it remains
+/// reliable when Sprite Vault uses a hidden/title-bar-light window style.
 struct NativeSearchField: NSViewRepresentable {
     @Binding var text: String
     var placeholder: String = "Search"
@@ -21,13 +22,17 @@ struct NativeSearchField: NSViewRepresentable {
         field.isEditable = true
         field.isSelectable = true
         field.isEnabled = true
-        field.font = .systemFont(ofSize: 14, weight: .regular)
-        field.textColor = .labelColor
+        field.font = .systemFont(ofSize: 14, weight: .medium)
+        field.textColor = .white
+        field.drawsBackground = true
+        field.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 0.96)
         field.placeholderString = placeholder
         field.bezelStyle = .roundedBezel
         field.controlSize = .large
+        field.focusRingType = .none
         field.stringValue = text
 
+        applyPlaceholderStyle(to: field)
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return field
@@ -43,7 +48,21 @@ struct NativeSearchField: NSViewRepresentable {
         }
         if field.placeholderString != placeholder {
             field.placeholderString = placeholder
+            applyPlaceholderStyle(to: field)
         }
+        field.textColor = .white
+        field.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 0.96)
+    }
+
+    private func applyPlaceholderStyle(to field: NSSearchField) {
+        guard let cell = field.cell as? NSSearchFieldCell else { return }
+        cell.placeholderAttributedString = NSAttributedString(
+            string: placeholder,
+            attributes: [
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .font: NSFont.systemFont(ofSize: 14, weight: .medium)
+            ]
+        )
     }
 
     final class Coordinator: NSObject, NSSearchFieldDelegate {
@@ -78,10 +97,10 @@ private final class ClickToFocusSearchField: NSSearchField {
             window.makeKeyAndOrderFront(nil)
         }
 
-        // Let NSSearchField create and position its native field editor first.
         super.mouseDown(with: event)
 
         if let editor = currentEditor() {
+            editor.textColor = .white
             window?.makeFirstResponder(editor)
         }
     }

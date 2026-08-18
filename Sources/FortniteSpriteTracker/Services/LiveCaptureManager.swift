@@ -33,16 +33,29 @@ final class LiveCaptureManager: ObservableObject {
     @Published private(set) var captureDevices: [CaptureDeviceInfo] = []
 
     @Published var sourceMode: CaptureSourceMode {
-        didSet { persistSourceSelection() }
+        didSet {
+            persistSourceSelection()
+            invalidatePreview()
+        }
     }
     @Published var selectedApplicationID: String? {
-        didSet { persistSourceSelection(); resolvedApplicationTarget = nil }
+        didSet {
+            persistSourceSelection()
+            resolvedApplicationTarget = nil
+            invalidatePreview()
+        }
     }
     @Published var selectedWindowID: CGWindowID? {
-        didSet { persistSourceSelection() }
+        didSet {
+            persistSourceSelection()
+            invalidatePreview()
+        }
     }
     @Published var selectedCaptureDeviceID: String? {
-        didSet { persistSourceSelection() }
+        didSet {
+            persistSourceSelection()
+            invalidatePreview()
+        }
     }
     @Published var targetProfileID: UUID? {
         didSet { lastDetectionSignature = "" }
@@ -51,6 +64,8 @@ final class LiveCaptureManager: ObservableObject {
 
     @Published private(set) var resolvedApplicationTarget: ResolvedCaptureTarget?
     @Published private(set) var previewImage: NSImage?
+    @Published private(set) var previewSourceLabel: String?
+    @Published private(set) var isPreviewRefreshing = false
     @Published private(set) var isRefreshing = false
     @Published private(set) var isStreaming = false
     @Published private(set) var isHotkeyScanning = false
@@ -94,6 +109,7 @@ final class LiveCaptureManager: ObservableObject {
     private var levelUpNames = Set<String>()
     private var masteredNames = Set<String>()
     private var lostNames = Set<String>()
+    private var previewRequestID = UUID()
 
     private enum DefaultsKey {
         static let mode = "capture.source.mode"
@@ -224,35 +240,92 @@ final class LiveCaptureManager: ObservableObject {
             resolvedApplicationTarget = nil
             return
         }
+
+        let requestedApplicationID = selectedApplicationID
         do {
-            resolvedApplicationTarget = try await captureService.resolvedWindow(for: selectedApplicationID)
+            let target = try await captureService.resolvedWindow(for: requestedApplicationID)
+            guard sourceMode == .application,
+                  self.selectedApplicationID == requestedApplicationID else { return }
+            resolvedApplicationTarget = target
         } catch {
+            guard sourceMode == .application,
+                  self.selectedApplicationID == requestedApplicationID else { return }
             resolvedApplicationTarget = nil
         }
     }
 
     func refreshPreview() async {
         guard !isStreaming else { return }
+
+        let requestID = UUID()
+        previewRequestID = requestID
+        isPreviewRefreshing = true
         errorText = nil
+        previewImage = nil
+        previewSourceLabel = nil
+        defer {
+            if previewRequestID == requestID {
+                isPreviewRefreshing = false
+            }
+        }
+
         do {
             let image: CGImage
+            let sourceKey: String
+            let sourceLabel: String
+
             switch sourceMode {
             case .application:
-                guard let target = try await resolveWindowForCurrentSource() else {
+                guard let applicationID = selectedApplicationID else {
                     throw LiveCaptureError.sourceUnavailable
                 }
+                guard let target = try await captureService.resolvedWindow(for: applicationID) else {
+                    throw LiveCaptureError.sourceUnavailable
+                }
+                sourceKey = "application:\(applicationID):\(target.windowID)"
+                sourceLabel = target.windowTitle.isEmpty
+                    ? target.applicationName
+                    : "\(target.applicationName) — \(target.windowTitle)"
                 image = try await captureService.captureOnce(windowID: target.windowID)
+
+                guard previewRequestID == requestID,
+                      sourceMode == .application,
+                      selectedApplicationID == applicationID else { return }
+                resolvedApplicationTarget = target
+
             case .window:
-                guard let selectedWindowID else { throw LiveCaptureError.sourceUnavailable }
-                image = try await captureService.captureOnce(windowID: selectedWindowID)
+                guard let windowID = selectedWindowID,
+                      let selected = windows.first(where: { $0.id == windowID }) else {
+                    throw LiveCaptureError.sourceUnavailable
+                }
+                sourceKey = "window:\(windowID)"
+                sourceLabel = selected.displayName
+                image = try await captureService.captureOnce(windowID: windowID)
+
+                guard previewRequestID == requestID,
+                      sourceMode == .window,
+                      selectedWindowID == windowID else { return }
+
             case .captureDevice:
                 statusText = "Start a scan to preview the live capture device."
                 return
             }
+
+            // A source picker can generate several async preview requests in a
+            // fraction of a second. Only the newest request is allowed to paint
+            // the preview. This prevents an older Weather/OBS/etc. capture from
+            // appearing under the newly selected window name.
+            guard previewRequestID == requestID,
+                  currentPreviewSourceKey == sourceKey else { return }
+
             previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
-            statusText = "Preview updated. Sprite Vault will still verify Sprites → Collection before saving anything."
+            previewSourceLabel = sourceLabel
+            statusText = "Preview locked to \(sourceLabel). Sprite Vault will still verify Sprites → Collection before saving anything."
         } catch {
+            guard previewRequestID == requestID else { return }
             errorText = error.localizedDescription
+            previewImage = nil
+            previewSourceLabel = nil
         }
     }
 
@@ -382,7 +455,9 @@ final class LiveCaptureManager: ObservableObject {
                     },
                     onPreview: { [weak self] image in
                         Task { @MainActor in
-                            self?.previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                            guard let self else { return }
+                            self.previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                            self.previewSourceLabel = self.selectedSourceDisplayName
                         }
                     },
                     onError: { [weak self] error in
@@ -403,7 +478,9 @@ final class LiveCaptureManager: ObservableObject {
                     },
                     onPreview: { [weak self] image in
                         Task { @MainActor in
-                            self?.previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                            guard let self else { return }
+                            self.previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                            self.previewSourceLabel = self.selectedSourceDisplayName
                         }
                     },
                     onError: { [weak self] error in
@@ -625,9 +702,37 @@ final class LiveCaptureManager: ObservableObject {
 
     private func resolveWindowForCurrentSource() async throws -> ResolvedCaptureTarget? {
         guard sourceMode == .application, let selectedApplicationID else { return nil }
-        let target = try await captureService.resolvedWindow(for: selectedApplicationID)
+        let requestedApplicationID = selectedApplicationID
+        let target = try await captureService.resolvedWindow(for: requestedApplicationID)
+        guard sourceMode == .application,
+              self.selectedApplicationID == requestedApplicationID else { return nil }
         resolvedApplicationTarget = target
         return target
+    }
+
+    private var currentPreviewSourceKey: String? {
+        switch sourceMode {
+        case .application:
+            guard let applicationID = selectedApplicationID,
+                  let target = resolvedApplicationTarget else { return nil }
+            return "application:\(applicationID):\(target.windowID)"
+        case .window:
+            guard let windowID = selectedWindowID else { return nil }
+            return "window:\(windowID)"
+        case .captureDevice:
+            guard let deviceID = selectedCaptureDeviceID else { return nil }
+            return "device:\(deviceID)"
+        }
+    }
+
+    private func invalidatePreview() {
+        previewRequestID = UUID()
+        isPreviewRefreshing = false
+        previewImage = nil
+        previewSourceLabel = nil
+        if !isStreaming {
+            isCollectionScreenDetected = false
+        }
     }
 
     private func receive(_ analysis: SpriteFrameAnalysis) {
