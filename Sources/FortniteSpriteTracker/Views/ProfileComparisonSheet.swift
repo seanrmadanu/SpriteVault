@@ -216,7 +216,7 @@ struct ProfileComparisonSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(statusTitle(item))
                     .font(.subheadline.weight(.bold))
-                if item.level == 5 {
+                if item.mastered {
                     Text("MASTERED")
                         .font(.caption2.weight(.black))
                         .foregroundStyle(.yellow)
@@ -290,12 +290,12 @@ struct ProfileComparisonSheet: View {
 
     private func statusSymbol(_ item: SpriteItem) -> String {
         guard item.owned else { return "lock.fill" }
-        return item.level == 5 ? "crown.fill" : "checkmark.circle.fill"
+        return item.mastered ? "crown.fill" : "checkmark.circle.fill"
     }
 
     private func statusColor(_ item: SpriteItem) -> Color {
         guard item.owned else { return .secondary }
-        return item.level == 5 ? .yellow : .green
+        return item.mastered ? .yellow : .green
     }
 
     private func rowBackground(_ row: ProfileComparisonRow) -> Color {

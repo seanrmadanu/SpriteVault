@@ -460,7 +460,7 @@ private struct PDFSpriteCell: View {
                 .padding(.top, 4)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            if item.level == 5 {
+            if item.mastered {
                 Image(systemName: "crown.fill")
                     .font(.system(size: 10, weight: .black))
                     .foregroundStyle(Color.black.opacity(0.84))
@@ -474,7 +474,7 @@ private struct PDFSpriteCell: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(item.level == 5 ? Color.yellow : Color.white.opacity(0.46), lineWidth: item.level == 5 ? 2.5 : 1.2)
+                .stroke(item.mastered ? Color.yellow : Color.white.opacity(0.46), lineWidth: item.mastered ? 2.5 : 1.2)
         )
     }
 

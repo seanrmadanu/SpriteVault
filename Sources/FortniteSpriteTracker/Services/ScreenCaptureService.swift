@@ -39,6 +39,9 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     private var selectedSystemFilter: SCContentFilter?
     private var selectedSystemSelection: SystemCaptureSelection?
     private var selectedSourceRect: CGRect?
+    private var selectedOverlayRect: CGRect?
+    private var latestStableFrame: CGImage?
+    private let overlayController = SpriteScanOverlayController()
     private var regionSelector: ScreenRegionSelector?
     private var pickerSelectionHandler: PickerSelectionHandler?
     private var pickerObserverInstalled = false
@@ -131,6 +134,8 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         selectedSystemFilter = nil
         selectedSystemSelection = nil
         selectedSourceRect = nil
+        selectedOverlayRect = nil
+        DispatchQueue.main.async { [overlayController] in overlayController.hide() }
         SavedCaptureRegion.clear()
     }
 
@@ -138,7 +143,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         guard let filter = selectedSystemFilter else {
             throw ScreenCaptureServiceError.noSystemSelection
         }
-        let configuration = configuration(for: filter, fps: 3, sourceRect: selectedSourceRect)
+        let configuration = configuration(for: filter, fps: 12, sourceRect: selectedSourceRect)
         return try await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
@@ -258,7 +263,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     func captureOnce(windowID: CGWindowID) async throws -> CGImage {
         let window = try await shareableWindow(withID: windowID)
         let filter = SCContentFilter(desktopIndependentWindow: window)
-        let configuration = configuration(for: filter, fps: 3, sourceRect: nil)
+        let configuration = configuration(for: filter, fps: 12, sourceRect: nil)
         return try await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
@@ -274,6 +279,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         onError: @escaping ErrorHandler
     ) async throws {
         let window = try await shareableWindow(withID: windowID)
+        selectedOverlayRect = Self.resolveOverlayRect(forWindowID: windowID, fallback: window.frame)
         let filter = SCContentFilter(desktopIndependentWindow: window)
         try await start(
             filter: filter,
@@ -297,17 +303,33 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     ) async throws {
         if stream != nil { await stop() }
 
-        let clampedFPS = min(max(fps, 2), 5)
+        // Capture at a genuinely responsive rate. Vision is throttled separately
+        // below, so 12–15 capture FPS does not mean 12–15 OCR passes per second.
+        let clampedFPS = min(max(fps, 8), 15)
         let configuration = configuration(for: filter, fps: clampedFPS, sourceRect: sourceRect)
 
         self.onAnalysis = onAnalysis
         self.onStatus = onStatus
         self.onPreview = onPreview
         self.onError = onError
-        // Vision is the expensive part. The capture stream can remain smooth,
-        // but analysis is intentionally capped so it never competes with the UI.
-        self.minimumAnalysisInterval = max(0.65, 1.0 / Double(clampedFPS))
+        // Keep motion/overlay feedback smooth while limiting expensive Vision.
+        // A stable view is analyzed at most about twice per second.
+        self.minimumAnalysisInterval = 0.48
         resetAdaptiveState()
+        latestStableFrame = nil
+        overlayController.onDeepScan = { [weak self] slot in
+            self?.requestDeepScan(slot: slot)
+        }
+
+        if selectedOverlayRect == nil {
+            selectedOverlayRect = Self.resolveOverlayRect(for: filter)
+        }
+        if let overlayRect = selectedOverlayRect {
+            DispatchQueue.main.async { [overlayController] in
+                overlayController.show(over: overlayRect)
+                overlayController.showWaiting(message: "Finding Sprite Collection…")
+            }
+        }
 
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
@@ -323,6 +345,8 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     }
 
     func stop() async {
+        DispatchQueue.main.async { [overlayController] in overlayController.hide() }
+        latestStableFrame = nil
         guard let stream else { return }
         self.stream = nil
         do {
@@ -349,13 +373,20 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         didUpdateWith filter: SCContentFilter,
         for stream: SCStream?
     ) {
-        selectedSystemFilter = filter
-        let selection = Self.describeSystemSelection(filter)
-        selectedSystemSelection = selection
         let handler = pickerSelectionHandler
         pickerSelectionHandler = nil
         picker.isActive = false
-        handler?(selection)
+
+        Task { [weak self] in
+            guard let self else { return }
+            let cleanFilter = await self.filterExcludingSpriteVaultIfNeeded(filter)
+            self.selectedSystemFilter = cleanFilter
+            self.selectedSourceRect = nil
+            self.selectedOverlayRect = Self.resolveOverlayRect(for: cleanFilter)
+            let selection = Self.describeSystemSelection(cleanFilter)
+            self.selectedSystemSelection = selection
+            handler?(selection)
+        }
     }
 
     func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
@@ -391,7 +422,11 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
             watchdogReportedIdle = false
             previousFingerprint = nil
             lastAnalyzedFingerprint = nil
+            latestStableFrame = nil
             motionStateActive = false
+            DispatchQueue.main.async { [overlayController] in
+                overlayController.showWaiting(message: "Capture resumed · finding collection…")
+            }
             onStatus?("Capture resumed — waiting briefly for the Sprite Collection to settle…")
         }
         guard let fingerprint = motionFingerprint(pixelBuffer) else { return }
@@ -404,8 +439,12 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
                 // Without this reset, switching away from Fortnite and returning
                 // to the same page can leave the scanner permanently "paused".
                 lastAnalyzedFingerprint = nil
+                latestStableFrame = nil
                 if !motionStateActive {
                     motionStateActive = true
+                    DispatchQueue.main.async { [overlayController] in
+                        overlayController.showMoving()
+                    }
                     onStatus?("Screen moving — waiting briefly for the collection to settle…")
                 }
             }
@@ -418,6 +457,9 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
 
         if motionStateActive {
             motionStateActive = false
+            DispatchQueue.main.async { [overlayController] in
+                overlayController.beginProcessing()
+            }
             onStatus?("Screen stable — scanner active.")
         }
 
@@ -441,6 +483,10 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         isAnalyzingFrame = true
         lastAnalysisStarted = now
         lastAnalyzedFingerprint = fingerprint
+        latestStableFrame = cgImage
+        DispatchQueue.main.async { [overlayController] in
+            overlayController.beginProcessing()
+        }
         onStatus?("Stable view found — reading left grid and right Sprite details…")
 
         Task { [weak self] in
@@ -456,12 +502,89 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
                     image: cgImage,
                     onProgress: { _, _ in }
                 )
+                DispatchQueue.main.async { [overlayController] in
+                    overlayController.update(with: analysis)
+                }
                 self.onAnalysis?(analysis)
             } catch is CancellationError {
                 return
             } catch {
                 self.onError?(error)
             }
+        }
+    }
+
+    private func requestDeepScan(slot: Int) {
+        sampleQueue.async { [weak self] in
+            guard let self else { return }
+            guard !self.isAnalyzingFrame, let frame = self.latestStableFrame else {
+                DispatchQueue.main.async { [overlayController = self.overlayController] in
+                    overlayController.finishDeepScan(slot: slot, detection: nil)
+                }
+                return
+            }
+
+            self.isAnalyzingFrame = true
+            Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    self.sampleQueue.async { [weak self] in self?.isAnalyzingFrame = false }
+                }
+
+                do {
+                    let detection = try await ScreenshotSpriteAnalyzer.shared.deepAnalyzeCard(
+                        image: frame,
+                        slot: slot
+                    )
+                    DispatchQueue.main.async { [overlayController = self.overlayController] in
+                        overlayController.finishDeepScan(slot: slot, detection: detection)
+                    }
+
+                    if let detection {
+                        self.onAnalysis?(SpriteFrameAnalysis(
+                            detections: [detection],
+                            isCollectionScreen: true,
+                            visibleSlots: 0,
+                            inferredPageStart: nil,
+                            lockedSlots: [],
+                            needsHelpSlots: [],
+                            selectedSpriteName: detection.name
+                        ))
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    DispatchQueue.main.async { [overlayController = self.overlayController] in
+                        overlayController.finishDeepScan(slot: slot, detection: nil)
+                    }
+                }
+            }
+        }
+    }
+
+    /// A desktop-independent window filter only contains the selected app
+    /// window, so our overlay cannot appear in it. A whole-display picker filter
+    /// does include other app windows, however. Rebuild that case with Sprite
+    /// Vault excluded so the user sees magenta feedback while Vision sees clean
+    /// Fortnite pixels.
+    private func filterExcludingSpriteVaultIfNeeded(_ filter: SCContentFilter) async -> SCContentFilter {
+        guard #available(macOS 15.2, *),
+              filter.style == .display,
+              let display = filter.includedDisplays.first,
+              let ownBundleID = Bundle.main.bundleIdentifier else {
+            return filter
+        }
+
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            let ownApps = content.applications.filter { $0.bundleIdentifier == ownBundleID }
+            guard !ownApps.isEmpty else { return filter }
+            return SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
+        } catch {
+            // The original system picker filter is still usable. Falling back is
+            // better than canceling a capture simply because exclusion refresh
+            // failed transiently.
+            return filter
         }
     }
 
@@ -506,6 +629,12 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
 
         selectedSystemFilter = filter
         selectedSourceRect = sourceRect
+        selectedOverlayRect = CGRect(
+            x: screen.frame.minX + clamped.minX,
+            y: screen.frame.minY + clamped.minY,
+            width: clamped.width,
+            height: clamped.height
+        )
 
         let scale = max(screen.backingScaleFactor, 1)
         let selection = SystemCaptureSelection(
@@ -549,6 +678,9 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
             self.previousFingerprint = nil
             self.lastAnalyzedFingerprint = nil
             self.motionStateActive = false
+            DispatchQueue.main.async { [overlayController = self.overlayController] in
+                overlayController.showWaiting(message: "Capture idle · waiting for frames")
+            }
             self.onStatus?("Capture source is temporarily idle — scanning will resume automatically when frames return.")
         }
         watchdogTimer = timer
@@ -557,6 +689,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
 
     private func resetAdaptiveState() {
         isAnalyzingFrame = false
+        latestStableFrame = nil
         lastAnalysisStarted = 0
         lastMotionAt = CFAbsoluteTimeGetCurrent()
         lastPreviewAt = 0
@@ -607,6 +740,65 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         configuration.scalesToFit = true
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         return configuration
+    }
+
+    private static func resolveOverlayRect(for filter: SCContentFilter) -> CGRect? {
+        if #available(macOS 15.2, *) {
+            if filter.style == .window, let window = filter.includedWindows.first {
+                return resolveOverlayRect(forWindowID: window.windowID, fallback: window.frame)
+            }
+
+            if filter.style == .display,
+               filter.contentRect.width > 20,
+               filter.contentRect.height > 20 {
+                // contentRect is the exact selected display rectangle in
+                // Quartz coordinates. Converting it directly avoids choosing
+                // the wrong monitor when displays share the same resolution.
+                return appKitRect(fromQuartzRect: filter.contentRect)
+            }
+        }
+
+        // Fallback for older systems where the picker does not expose its
+        // included window list. contentRect uses the Quartz top-left desktop
+        // coordinate space, so convert it to AppKit's bottom-left coordinates.
+        if filter.contentRect.width > 20, filter.contentRect.height > 20 {
+            return appKitRect(fromQuartzRect: filter.contentRect)
+        }
+        return NSScreen.main?.frame
+    }
+
+    private static func resolveOverlayRect(forWindowID windowID: CGWindowID, fallback: CGRect) -> CGRect? {
+        if let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
+           let dictionary = info.first?[kCGWindowBounds as String] as? CFDictionary,
+           let quartzRect = CGRect(dictionaryRepresentation: dictionary) {
+            return appKitRect(fromQuartzRect: quartzRect)
+        }
+        return appKitRect(fromQuartzRect: fallback)
+    }
+
+    private static func appKitRect(fromQuartzRect rect: CGRect) -> CGRect {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        for screen in NSScreen.screens {
+            guard let displayID = displayID(for: screen) else { continue }
+            let quartzDisplay = CGDisplayBounds(displayID)
+            guard quartzDisplay.contains(center) || quartzDisplay.intersects(rect) else { continue }
+
+            let sx = screen.frame.width / max(quartzDisplay.width, 1)
+            let sy = screen.frame.height / max(quartzDisplay.height, 1)
+            let localX = (rect.minX - quartzDisplay.minX) * sx
+            let localTop = (rect.minY - quartzDisplay.minY) * sy
+            let width = rect.width * sx
+            let height = rect.height * sy
+            return CGRect(
+                x: screen.frame.minX + localX,
+                y: screen.frame.maxY - localTop - height,
+                width: width,
+                height: height
+            )
+        }
+
+        let desktopTop = NSScreen.screens.map(\.frame.maxY).max() ?? rect.maxY
+        return CGRect(x: rect.minX, y: desktopTop - rect.maxY, width: rect.width, height: rect.height)
     }
 
     private static func describeSystemSelection(_ filter: SCContentFilter) -> SystemCaptureSelection {
@@ -763,6 +955,414 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
             score -= 80
         }
         return score
+    }
+}
+
+private enum SpriteOverlayCardState: Equatable {
+    case processing
+    case recognized(name: String, level: Int?, mastered: Bool)
+    case needsHelp(promptForSelection: Bool)
+    case locked
+    case lost(name: String, level: Int?, mastered: Bool)
+}
+
+private final class SpriteScanOverlayController {
+    var onDeepScan: ((Int) -> Void)?
+
+    private var panel: NSPanel?
+    private var overlayView: SpriteScanOverlayView?
+    private var hoverTimer: Timer?
+    private var hoveredSlot: Int?
+    private var hoverStartedAt: TimeInterval = 0
+    private var deepScannedSlots = Set<Int>()
+
+    deinit { hoverTimer?.invalidate() }
+
+    func show(over frame: CGRect) {
+        precondition(Thread.isMainThread)
+        let usableFrame = frame.standardized
+        guard usableFrame.width >= 100, usableFrame.height >= 100 else { return }
+
+        if let panel {
+            panel.setFrame(usableFrame, display: true)
+            panel.orderFrontRegardless()
+            startHoverTracking()
+            return
+        }
+
+        let panel = NSPanel(
+            contentRect: usableFrame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .screenSaver
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [
+            .canJoinAllSpaces,
+            .fullScreenAuxiliary,
+            .stationary,
+            .ignoresCycle
+        ]
+        panel.isReleasedWhenClosed = false
+
+        let view = SpriteScanOverlayView(frame: CGRect(origin: .zero, size: usableFrame.size))
+        view.autoresizingMask = [.width, .height]
+        panel.contentView = view
+        self.panel = panel
+        self.overlayView = view
+        panel.orderFrontRegardless()
+        startHoverTracking()
+    }
+
+    func hide() {
+        precondition(Thread.isMainThread)
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+        hoveredSlot = nil
+        deepScannedSlots.removeAll()
+        panel?.orderOut(nil)
+        panel = nil
+        overlayView = nil
+    }
+
+    func showWaiting(message: String) {
+        precondition(Thread.isMainThread)
+        deepScannedSlots.removeAll()
+        overlayView?.mode = .waiting
+        overlayView?.statusText = message
+        overlayView?.cardStates = [:]
+        overlayView?.needsDisplay = true
+    }
+
+    func showMoving() {
+        precondition(Thread.isMainThread)
+        // Slot numbers are positional. Once the collection scrolls, slot 4 can
+        // contain a completely different Sprite, so retry history must reset.
+        deepScannedSlots.removeAll()
+        hoveredSlot = nil
+        overlayView?.hoveredSlot = nil
+        overlayView?.mode = .moving
+        overlayView?.statusText = "Scrolling…"
+        overlayView?.needsDisplay = true
+    }
+
+    func beginProcessing() {
+        precondition(Thread.isMainThread)
+        var states: [Int: SpriteOverlayCardState] = [:]
+        for slot in 0..<12 { states[slot] = .processing }
+        overlayView?.mode = .collection
+        overlayView?.statusText = "Reading visible Sprites…"
+        overlayView?.cardStates = states
+        overlayView?.needsDisplay = true
+    }
+
+    func update(with analysis: SpriteFrameAnalysis) {
+        precondition(Thread.isMainThread)
+        guard analysis.isCollectionScreen else {
+            showWaiting(message: "Finding Sprite Collection…")
+            return
+        }
+
+        let visibleCount = max(0, min(analysis.visibleSlots, 12))
+        var states: [Int: SpriteOverlayCardState] = [:]
+        for slot in 0..<visibleCount { states[slot] = .needsHelp(promptForSelection: false) }
+
+        for slot in analysis.lockedSlots where slot < visibleCount {
+            states[slot] = .locked
+        }
+        for slot in analysis.needsHelpSlots where slot < visibleCount {
+            states[slot] = .needsHelp(promptForSelection: deepScannedSlots.contains(slot))
+        }
+        for detection in analysis.detections {
+            guard let slot = detection.gridSlot, slot < 12 else { continue }
+            if detection.status == .lost {
+                states[slot] = .lost(
+                    name: detection.name,
+                    level: detection.level,
+                    mastered: detection.mastered
+                )
+            } else {
+                states[slot] = .recognized(
+                    name: detection.name,
+                    level: detection.level,
+                    mastered: detection.mastered
+                )
+            }
+        }
+
+        overlayView?.mode = .collection
+        overlayView?.statusText = analysis.detections.isEmpty
+            ? "Collection found · waiting for readable cards"
+            : "Collection found · \(analysis.detections.count) recognized"
+        overlayView?.cardStates = states
+        overlayView?.needsDisplay = true
+    }
+
+    func finishDeepScan(slot: Int, detection: DetectedSprite?) {
+        precondition(Thread.isMainThread)
+        deepScannedSlots.insert(slot)
+        guard var states = overlayView?.cardStates else { return }
+        if let detection {
+            states[slot] = detection.status == .lost
+                ? .lost(name: detection.name, level: detection.level, mastered: detection.mastered)
+                : .recognized(name: detection.name, level: detection.level, mastered: detection.mastered)
+        } else {
+            states[slot] = .needsHelp(promptForSelection: true)
+        }
+        overlayView?.cardStates = states
+        if let detection {
+            overlayView?.statusText = "Deep scan recognized \(detection.name)"
+        } else {
+            overlayView?.statusText = "Needs help · select this Sprite in Fortnite"
+        }
+        overlayView?.needsDisplay = true
+    }
+
+    private func startHoverTracking() {
+        hoverTimer?.invalidate()
+        hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+            self?.pollMouse()
+        }
+        if let hoverTimer { RunLoop.main.add(hoverTimer, forMode: .common) }
+    }
+
+    private func pollMouse() {
+        guard let panel, let view = overlayView, view.mode == .collection else { return }
+        let globalPoint = NSEvent.mouseLocation
+        guard panel.frame.contains(globalPoint) else {
+            resetHover()
+            return
+        }
+
+        let local = CGPoint(x: globalPoint.x - panel.frame.minX, y: globalPoint.y - panel.frame.minY)
+        guard let slot = view.cardSlot(at: local),
+              let state = view.cardStates[slot],
+              case .needsHelp = state else {
+            resetHover()
+            return
+        }
+
+        if hoveredSlot != slot {
+            hoveredSlot = slot
+            hoverStartedAt = ProcessInfo.processInfo.systemUptime
+            view.hoveredSlot = slot
+            view.needsDisplay = true
+            return
+        }
+
+        let elapsed = ProcessInfo.processInfo.systemUptime - hoverStartedAt
+        guard elapsed >= 0.70, !deepScannedSlots.contains(slot) else { return }
+        deepScannedSlots.insert(slot)
+        view.cardStates[slot] = .processing
+        view.hoveredSlot = slot
+        view.statusText = "Deep scanning card \(slot + 1)…"
+        view.needsDisplay = true
+        onDeepScan?(slot)
+    }
+
+    private func resetHover() {
+        guard hoveredSlot != nil else { return }
+        hoveredSlot = nil
+        overlayView?.hoveredSlot = nil
+        overlayView?.needsDisplay = true
+    }
+}
+
+private final class SpriteScanOverlayView: NSView {
+    enum Mode { case waiting, moving, collection }
+
+    var mode: Mode = .waiting
+    var statusText = "Finding Sprite Collection…"
+    var cardStates: [Int: SpriteOverlayCardState] = [:]
+    var hoveredSlot: Int?
+
+    private let magenta = NSColor(calibratedRed: 1.0, green: 0.10, blue: 0.72, alpha: 1.0)
+
+    override var isFlipped: Bool { false }
+    override var acceptsFirstResponder: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard !bounds.isEmpty else { return }
+
+        if mode == .collection || mode == .moving {
+            drawCardGrid()
+            drawRightPanelGuide()
+        }
+        drawStatusPill()
+    }
+
+    func cardSlot(at point: CGPoint) -> Int? {
+        for slot in 0..<12 where cardRect(slot: slot).contains(point) {
+            return slot
+        }
+        return nil
+    }
+
+    private func drawCardGrid() {
+        let alpha: CGFloat = mode == .moving ? 0.34 : 0.96
+        for slot in 0..<12 {
+            let rect = cardRect(slot: slot)
+            let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
+            magenta.withAlphaComponent(alpha).setStroke()
+            path.lineWidth = hoveredSlot == slot ? 3.0 : 2.0
+            path.stroke()
+
+            guard mode == .collection, let state = cardStates[slot] else { continue }
+            drawBadge(state: state, in: rect, slot: slot)
+        }
+    }
+
+    private func drawBadge(state: SpriteOverlayCardState, in card: CGRect, slot: Int) {
+        let text: String
+        let fill: NSColor
+        switch state {
+        case .processing:
+            text = "•••"
+            fill = NSColor.black.withAlphaComponent(0.78)
+        case let .recognized(_, level, mastered):
+            let levelText = level.map { " L\($0)" } ?? ""
+            text = "👍\(levelText)\(mastered ? " 👑" : "")"
+            fill = NSColor.black.withAlphaComponent(0.80)
+        case let .needsHelp(prompt):
+            text = prompt ? "👎 SELECT" : "👎"
+            fill = NSColor.black.withAlphaComponent(0.82)
+        case .locked:
+            text = "🔒"
+            fill = NSColor.black.withAlphaComponent(0.76)
+        case let .lost(_, level, mastered):
+            let levelText = level.map { " L\($0)" } ?? ""
+            text = "LOST\(levelText)\(mastered ? " 👑" : "")"
+            fill = NSColor.black.withAlphaComponent(0.82)
+        }
+
+        let font = NSFont.systemFont(ofSize: max(10, min(13, card.width * 0.10)), weight: .bold)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.white
+        ]
+        let size = text.size(withAttributes: attributes)
+        let badgeWidth = min(card.width - 8, size.width + 12)
+        let badge = CGRect(
+            x: card.maxX - badgeWidth - 4,
+            y: card.maxY - size.height - 12,
+            width: badgeWidth,
+            height: size.height + 8
+        )
+        fill.setFill()
+        NSBezierPath(roundedRect: badge, xRadius: badge.height / 2, yRadius: badge.height / 2).fill()
+        text.draw(
+            at: CGPoint(x: badge.minX + 6, y: badge.minY + 4),
+            withAttributes: attributes
+        )
+
+        if case .needsHelp = state, hoveredSlot == slot {
+            drawHelpText(for: state, card: card)
+        }
+    }
+
+    private func drawHelpText(for state: SpriteOverlayCardState, card: CGRect) {
+        guard case let .needsHelp(prompt) = state else { return }
+        let message = prompt ? "Select this Sprite in Fortnite to verify" : "Hover to deep scan"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold),
+            .foregroundColor: NSColor.white
+        ]
+        let width = min(max(card.width * 1.65, 150), 235)
+        let textRect = CGRect(x: card.midX - width / 2, y: card.minY - 30, width: width, height: 25)
+        NSColor.black.withAlphaComponent(0.84).setFill()
+        NSBezierPath(roundedRect: textRect, xRadius: 7, yRadius: 7).fill()
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        var attrs = attributes
+        attrs[.paragraphStyle] = paragraph
+        message.draw(in: textRect.insetBy(dx: 6, dy: 6), withAttributes: attrs)
+    }
+
+    private func drawRightPanelGuide() {
+        let viewport = viewportRect
+        let topLeft = CGRect(
+            x: viewport.minX + viewport.width * 0.655,
+            y: viewport.minY + viewport.height * 0.455,
+            width: viewport.width * 0.285,
+            height: viewport.height * 0.270
+        )
+        let rect = CGRect(
+            x: topLeft.minX,
+            y: viewport.maxY - (topLeft.minY - viewport.minY) - topLeft.height,
+            width: topLeft.width,
+            height: topLeft.height
+        )
+        magenta.withAlphaComponent(mode == .moving ? 0.18 : 0.38).setStroke()
+        let path = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+        path.lineWidth = 1.2
+        path.stroke()
+    }
+
+    private func drawStatusPill() {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+            .foregroundColor: NSColor.white
+        ]
+        let size = statusText.size(withAttributes: attributes)
+        let width = min(max(size.width + 24, 150), max(bounds.width - 24, 150))
+        let rect = CGRect(
+            x: max((bounds.width - width) / 2, 12),
+            y: max(bounds.height - size.height - 38, 12),
+            width: width,
+            height: size.height + 16
+        )
+        NSColor.black.withAlphaComponent(0.72).setFill()
+        NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
+        magenta.withAlphaComponent(0.75).setStroke()
+        let border = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
+        border.lineWidth = 1
+        border.stroke()
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        var attrs = attributes
+        attrs[.paragraphStyle] = paragraph
+        statusText.draw(in: rect.insetBy(dx: 10, dy: 8), withAttributes: attrs)
+    }
+
+    private var viewportRect: CGRect {
+        let targetAspect: CGFloat = 16.0 / 9.0
+        let currentAspect = bounds.width / max(bounds.height, 1)
+        if currentAspect > targetAspect {
+            let width = bounds.height * targetAspect
+            return CGRect(x: (bounds.width - width) / 2, y: 0, width: width, height: bounds.height)
+        }
+        let height = bounds.width / targetAspect
+        return CGRect(x: 0, y: (bounds.height - height) / 2, width: bounds.width, height: height)
+    }
+
+    private func cardRect(slot: Int) -> CGRect {
+        let viewport = viewportRect
+        let column = slot % 3
+        let row = slot / 3
+        let firstColumnCenter: CGFloat = 0.118
+        let columnStep: CGFloat = 0.080
+        let firstRowTop: CGFloat = 0.232
+        let rowStep: CGFloat = 0.180
+        let cardWidth: CGFloat = 0.079
+        let cardHeight: CGFloat = 0.166
+
+        let normalizedX = firstColumnCenter + CGFloat(column) * columnStep - cardWidth / 2
+        let normalizedTop = firstRowTop + CGFloat(row) * rowStep
+        let width = viewport.width * cardWidth
+        let height = viewport.height * cardHeight
+        return CGRect(
+            x: viewport.minX + viewport.width * normalizedX,
+            y: viewport.maxY - viewport.height * normalizedTop - height,
+            width: width,
+            height: height
+        )
     }
 }
 

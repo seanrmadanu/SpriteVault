@@ -88,7 +88,7 @@ final class VideoCaptureDeviceService: NSObject, AVCaptureVideoDataOutputSampleB
         self.onStatus = onStatus
         self.onPreview = onPreview
         self.onError = onError
-        self.minimumAnalysisInterval = max(0.50, 1.0 / Double(min(max(fps, 2), 5)))
+        self.minimumAnalysisInterval = 0.48
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sessionQueue.async { [weak self] in

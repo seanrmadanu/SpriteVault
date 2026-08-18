@@ -185,19 +185,20 @@ struct LiveCaptureSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Scanner")
                         .font(.headline)
-                    Text("Heavy Vision work runs only after the collection stops moving.")
+                    Text("Capture stays smooth while heavy Vision work runs only after the collection stops moving.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
 
-                Picker("Speed", selection: $liveCapture.framesPerSecond) {
-                    Text("Efficient · 2 FPS").tag(2)
-                    Text("Responsive · 3 FPS").tag(3)
+                Picker("Capture FPS", selection: $liveCapture.framesPerSecond) {
+                    Text("8 FPS").tag(8)
+                    Text("12 FPS").tag(12)
+                    Text("15 FPS").tag(15)
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: 255)
+                .frame(width: 230)
                 .disabled(liveCapture.isStreaming)
             }
 

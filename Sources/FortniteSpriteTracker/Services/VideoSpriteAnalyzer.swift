@@ -25,6 +25,7 @@ struct SpriteFrameAnalysis: Sendable {
     let visibleSlots: Int
     let inferredPageStart: Int?
     let lockedSlots: Set<Int>
+    let needsHelpSlots: Set<Int>
     let selectedSpriteName: String?
 }
 
@@ -81,12 +82,14 @@ actor VideoSpriteAnalyzer {
                 record(
                     item: selected.item,
                     level: selected.level,
+                    mastered: selected.mastered,
                     isExactMatch: selected.isExactMatch,
                     frameIndex: frameIndex,
                     timestamp: timestamp,
                     tallies: &tallies
                 )
-                progressDescription = "\(selected.item.name) · Lvl \(selected.level)"
+                let levelText = selected.level.map { "Lvl \($0)" } ?? "level unreadable"
+                progressDescription = "\(selected.item.name) · \(levelText)\(selected.mastered ? " · Mastered" : "")"
                 foundSelection = true
             }
 
@@ -97,14 +100,16 @@ actor VideoSpriteAnalyzer {
         }
 
         return tallies.values.compactMap { tally in
-            guard let level = tally.confirmedLevel else { return nil }
+            let level = tally.confirmedLevel
+            let mastered = tally.confirmedMastered || level == 5
+            guard level != nil || mastered else { return nil }
 
             return DetectedSprite(
                 name: tally.item.name,
                 rarity: tally.item.rarity,
                 status: .collected,
                 level: level,
-                mastered: level == 5,
+                mastered: mastered,
                 timestamp: tally.firstTimestamp,
                 observations: tally.frameIndices.count
             )
@@ -187,7 +192,7 @@ actor VideoSpriteAnalyzer {
 
     private func selectedSprite(
         in lines: [OCRLine]
-    ) -> (item: SpriteItem, level: Int, isExactMatch: Bool)? {
+    ) -> (item: SpriteItem, level: Int?, mastered: Bool, isExactMatch: Bool)? {
         let expandedLines = linesIncludingJoinedFragments(lines)
         let largestTextHeight = expandedLines.map(\.box.height).max() ?? 0
         let panelShowsMastered = expandedLines.contains { line in
@@ -218,17 +223,12 @@ actor VideoSpriteAnalyzer {
                 return (level, horizontal * 0.25 + vertical)
             }
 
-            if panelShowsMastered {
+            let nearest = nearbyLevels.min(by: { $0.distance < $1.distance })
+            if nearest != nil || panelShowsMastered {
                 return (
                     match.match.item,
-                    5,
-                    match.match.isExact && match.line.candidateRank == 0
-                )
-            }
-            if let nearest = nearbyLevels.min(by: { $0.distance < $1.distance }) {
-                return (
-                    match.match.item,
-                    nearest.level,
+                    nearest?.level,
+                    panelShowsMastered,
                     match.match.isExact && match.line.candidateRank == 0
                 )
             }
@@ -379,7 +379,8 @@ actor VideoSpriteAnalyzer {
 
     private func record(
         item: SpriteItem,
-        level: Int,
+        level: Int?,
+        mastered: Bool,
         isExactMatch: Bool,
         frameIndex: Int,
         timestamp: Double,
@@ -387,7 +388,7 @@ actor VideoSpriteAnalyzer {
     ) {
         let key = normalize(item.name)
         var tally = tallies[key] ?? DetectionTally(item: item, firstTimestamp: timestamp)
-        tally.add(level: level, isExactMatch: isExactMatch, frameIndex: frameIndex)
+        tally.add(level: level, mastered: mastered, isExactMatch: isExactMatch, frameIndex: frameIndex)
         tallies[key] = tally
     }
 
@@ -434,6 +435,8 @@ private struct DetectionTally {
     let firstTimestamp: Double
     var levelVotes: [Int: Int] = [:]
     var exactLevelVotes: [Int: Int] = [:]
+    var masteredVotes = 0
+    var exactMasteredVotes = 0
     var frameIndices = Set<Int>()
 
     var confirmedLevel: Int? {
@@ -450,11 +453,23 @@ private struct DetectionTally {
         return best.key
     }
 
-    mutating func add(level: Int, isExactMatch: Bool, frameIndex: Int) {
+    var confirmedMastered: Bool {
+        masteredVotes >= 2 || exactMasteredVotes >= 1
+    }
+
+    mutating func add(level: Int?, mastered: Bool, isExactMatch: Bool, frameIndex: Int) {
         guard frameIndices.insert(frameIndex).inserted else { return }
-        levelVotes[level, default: 0] += 1
-        if isExactMatch {
-            exactLevelVotes[level, default: 0] += 1
+        if let level {
+            levelVotes[level, default: 0] += 1
+            if isExactMatch {
+                exactLevelVotes[level, default: 0] += 1
+            }
+        }
+        if mastered {
+            masteredVotes += 1
+            if isExactMatch {
+                exactMasteredVotes += 1
+            }
         }
     }
 }

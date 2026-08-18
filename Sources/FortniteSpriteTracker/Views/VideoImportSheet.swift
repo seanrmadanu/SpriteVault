@@ -135,7 +135,7 @@ struct VideoImportSheet: View {
                                     Text(result.name)
                                         .fontWeight(.semibold)
                                         .fixedSize(horizontal: false, vertical: true)
-                                    Text(result.mastered ? "MASTERED · LVL 5" : result.level.map { "LVL \($0)" } ?? (result.status == .lost ? "LOST" : "UNLOCKED"))
+                                    Text(resultSummary(result))
                                         .font(.caption2.weight(.black))
                                         .foregroundStyle(.secondary)
                                         .fixedSize(horizontal: false, vertical: true)
@@ -378,9 +378,18 @@ struct VideoImportSheet: View {
     private func analyzeScreenshotBatch(_ urls: [URL]) async {
         var combined: [DetectedSprite] = []
         var failures: [String] = []
-        let total = max(urls.count, 1)
+        // Process screenshots oldest -> newest when Finder metadata is
+        // available. Current Sprite level can legitimately go DOWN after a
+        // mastered Sprite is lost, so the newest readable level should win.
+        let orderedURLs = urls.enumerated().sorted { lhs, rhs in
+            let ld = screenshotDate(lhs.element)
+            let rd = screenshotDate(rhs.element)
+            if let ld, let rd, ld != rd { return ld < rd }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+        let total = max(orderedURLs.count, 1)
 
-        for (index, url) in urls.enumerated() {
+        for (index, url) in orderedURLs.enumerated() {
             if Task.isCancelled { break }
             let didAccess = url.startAccessingSecurityScopedResource()
             defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
@@ -483,17 +492,17 @@ struct VideoImportSheet: View {
                 continue
             }
 
-            let previousLevel = previous.level ?? 0
-            let detectedLevel = detection.level ?? 0
-            let mergedLevelValue = max(previousLevel, detectedLevel)
-            let mergedLevel: Int? = mergedLevelValue == 0 ? nil : mergedLevelValue
+            // Mastery is permanent historical state; level/status describe
+            // the current observation. Therefore do NOT take max(level): a
+            // mastered Sprite may be Level 5 in an older screenshot and Level 1
+            // in a newer screenshot after it was lost.
+            let mergedLevel = detection.level ?? previous.level
             let mergedMastered = previous.mastered || detection.mastered || mergedLevel == 5
-            let mergedStatus: SpriteCollectionStatus = (previous.status == .lost || detection.status == .lost) ? .lost : .collected
 
             byName[key] = DetectedSprite(
                 name: detection.name,
                 rarity: detection.rarity,
-                status: mergedStatus,
+                status: detection.status,
                 level: mergedLevel,
                 mastered: mergedMastered,
                 timestamp: max(previous.timestamp, detection.timestamp),
@@ -503,6 +512,22 @@ struct VideoImportSheet: View {
             )
         }
         return Array(byName.values)
+    }
+
+    private func screenshotDate(_ url: URL) -> Date? {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+        return values?.contentModificationDate ?? values?.creationDate
+    }
+
+    private func resultSummary(_ result: DetectedSprite) -> String {
+        var parts: [String] = []
+        if result.status == .lost { parts.append("LOST") }
+        if let level = result.level { parts.append("LVL \(level)") }
+        if result.mastered { parts.append("MASTERED 👑") }
+        if parts.isEmpty { parts.append("UNLOCKED") }
+        return parts.joined(separator: " · ")
     }
 
     private func mediaKind(for url: URL) -> ImportedMediaKind {
@@ -544,7 +569,7 @@ struct VideoImportSheet: View {
 
     private var importHint: String {
         if isScreenshotImport {
-            return "Select as many Collection screenshots as needed. Overlap is fine: duplicates are merged, higher confirmed levels win, and Level 5 becomes Mastered."
+            return "Select as many Collection screenshots as needed. Overlap is fine: duplicates are merged, current level and mastery crown are tracked separately."
         }
         return "Select every card for about 1 second. Wrapped titles and the Mastered banner are supported."
     }

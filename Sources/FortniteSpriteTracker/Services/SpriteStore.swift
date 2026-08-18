@@ -66,7 +66,7 @@ final class SpriteStore: ObservableObject {
             let matchesRarity = selectedRarity == nil || item.rarity == selectedRarity
             let matchesOwned = !showOnlyOwned || item.owned
             let matchesNotOwned = !showOnlyNotOwned || !item.owned
-            let matchesMastered = !showOnlyMastered || item.level == 5
+            let matchesMastered = !showOnlyMastered || item.mastered
             return matchesSearch && matchesRarity && matchesOwned && matchesNotOwned && matchesMastered
         }
     }
@@ -148,13 +148,8 @@ final class SpriteStore: ObservableObject {
         mutateSelectedProfile { profile in
             guard let index = profile.sprites.firstIndex(where: { $0.id == item.id }) else { return }
             profile.sprites[index].mastered.toggle()
-            if profile.sprites[index].mastered {
-                if profile.sprites[index].status == .locked {
-                    profile.sprites[index].status = .collected
-                }
-                profile.sprites[index].level = 5
-            } else if profile.sprites[index].level == 5 {
-                profile.sprites[index].level = nil
+            if profile.sprites[index].mastered, profile.sprites[index].status == .locked {
+                profile.sprites[index].status = .collected
             }
             event = .init(
                 name: profile.sprites[index].name,
@@ -176,9 +171,11 @@ final class SpriteStore: ObservableObject {
                 if profile.sprites[index].status == .locked {
                     profile.sprites[index].status = .collected
                 }
-                profile.sprites[index].mastered = validatedLevel == 5
-            } else {
-                profile.sprites[index].mastered = false
+                // Level and mastery are separate states. A mastered Sprite can
+                // return to Level 1 after being lost, while keeping its crown.
+                if validatedLevel == 5 {
+                    profile.sprites[index].mastered = true
+                }
             }
 
             event = .init(
@@ -228,7 +225,7 @@ final class SpriteStore: ObservableObject {
                 if let detectedLevel = detection.level {
                     profile.sprites[index].level = detectedLevel
                 }
-                profile.sprites[index].mastered = detection.mastered || profile.sprites[index].level == 5
+                profile.sprites[index].mastered = profile.sprites[index].mastered || detection.mastered || profile.sprites[index].level == 5
                 let after = profile.sprites[index]
 
                 guard before.status != after.status

@@ -96,7 +96,7 @@ struct SpriteCard: View {
         if item.mastered {
             HStack(spacing: 4) {
                 Image(systemName: "crown.fill")
-                Text("LVL 5")
+                Text(item.level.map { "LVL \($0)" } ?? "MASTERED")
             }
             .font(.system(size: 10, weight: .black, design: .rounded))
             .padding(.horizontal, 8)
@@ -140,7 +140,7 @@ struct SpriteCard: View {
                 }
                 Divider()
                 Button(action: onMastered) {
-                    Label(item.mastered ? "Clear Level 5" : "Set Level 5 (Mastered)", systemImage: item.mastered ? "crown" : "crown.fill")
+                    Label(item.mastered ? "Clear Mastered" : "Mark Mastered", systemImage: item.mastered ? "crown" : "crown.fill")
                 }
                 Button { onLevel(nil) } label: {
                     Label("Clear Level", systemImage: "xmark.circle")

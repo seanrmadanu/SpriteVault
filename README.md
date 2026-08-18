@@ -43,10 +43,27 @@ Two progress values are kept separate:
 
 A stable Collection frame is analyzed from both sides:
 
-- **Left grid:** artwork feature matching, `Lvl 1–5`, mastery from Level 5, and visible catalog slots.
-- **Right detail panel:** exact selected Sprite name, rarity, level/mastery text, and `LOST IN PAST MATCH`.
+- **Left grid:** artwork feature matching, `Lvl 1–5`, mastery-crown detection, locked/lost state, and visible catalog slots.
+- **Right detail panel:** exact selected Sprite name, rarity, current level, `SPRITE MASTERED`, and `LOST IN PAST MATCH`.
 
-The right panel is treated as stronger evidence for the selected card and can correct an uncertain visual artwork match.
+The right panel is treated as stronger evidence for the selected card and can correct an uncertain visual artwork match. Mastery and current level are stored independently: a mastered Sprite may later be `Lvl 1` after being lost and still remain mastered because the crown is permanent evidence of mastery.
+
+
+## Live magenta overlay
+
+Live Screen / Window capture now draws a lightweight transparent overlay directly over the selected Fortnite surface:
+
+- thin magenta outline around each of the 12 visible Sprite-card slots
+- `•••` while a stable card is processing
+- `👍` plus current level and crown when recognized
+- `👎` when the scanner needs help (this does **not** mean unowned)
+- `🔒` only for cards that look confidently locked
+- `LOST` for a recognized greyed-out Sprite
+- a subtle guide over the right detail panel
+
+The panel is click-through and tracks the global mouse without stealing Fortnite input. Hovering a `👎` card for about 0.7 seconds triggers a stronger single-card deep scan. If that still fails, the badge changes to `👎 SELECT`; selecting the same card inside Fortnite lets the right detail panel verify the name/level/mastery on the next stable frame.
+
+Capture runs at **12 FPS by default** with 8/12/15 FPS options. Expensive Vision analysis remains adaptive and runs only after the collection stabilizes, so increasing capture FPS does not mean running OCR 12–15 times per second.
 
 ## Locked, collected, and lost Sprites
 
@@ -75,7 +92,7 @@ Activity is stored locally by scan session and includes clickable lists of new, 
 
 ## Menu-bar companion
 
-Sprite Vault stays available from the macOS menu bar even if the main window is closed. The menu-bar panel shows:
+While Sprite Vault is running, the menu-bar panel shows:
 
 - scan state and elapsed time
 - selected source
@@ -102,11 +119,11 @@ The **Live Capture** toolbar button becomes a live status capsule while a hotkey
 
 ## Sprite card hover
 
-Hovering keeps the Sprite card centered on its original grid position and expands it in every direction. The hover card uses a high stacking order so neighboring cards do not cover it. Expensive perpetual light-sweep/card-float effects were removed to keep scrolling smooth. Sprite names, gameplay descriptions, variant perks, and scan result text wrap to full lines instead of being shortened with ellipses.
+The collection cards currently stay fixed in place on hover. The previous pop/zoom animation is disabled to avoid clipping, stacking problems, and unnecessary redraw work. Sprite names, gameplay descriptions, variant perks, and scan-result text wrap to full lines instead of being shortened with ellipses.
 
 ## Batch screenshot import
 
-Screenshot import accepts multiple images in one Finder selection. Additional screenshots can be appended to the same batch, each image is analyzed independently, unreadable screenshots do not abort the rest of the batch, and duplicate Sprite detections are merged before review. Repeated detections increase the evidence count; higher confirmed levels and Mastered status are preserved. Video import remains one recording at a time.
+Screenshot import accepts multiple images in one Finder selection. Additional screenshots can be appended to the same batch, each image is analyzed independently, unreadable screenshots do not abort the rest of the batch, and duplicate Sprite detections are merged before review. When screenshot dates are available they are processed oldest-to-newest: the newest readable current level/status wins while mastery is preserved permanently. This matters because a mastered Sprite can drop from Level 5 to Level 1 after being lost. Video import remains one recording at a time.
 
 ## Profiles, search, filters, compare, and PDF
 

@@ -67,12 +67,15 @@ actor ScreenshotSpriteAnalyzer {
                 visibleSlots: 0,
                 inferredPageStart: nil,
                 lockedSlots: [],
+                needsHelpSlots: [],
                 selectedSpriteName: nil
             )
         }
 
         var cards: [CardFeature] = []
         var selectionCandidates: [(slot: Int, score: Double)] = []
+        var confidentLockedSlots = Set<Int>()
+        var needsHelpSlots = Set<Int>()
         onProgress(0.16, "Matching the visible Sprite cards…")
 
         for slot in 0..<12 {
@@ -82,19 +85,28 @@ actor ScreenshotSpriteAnalyzer {
             selectionCandidates.append((slot, selectionScore(in: card)))
 
             let level = levelsBySlot[slot]
-            // Level text is the strongest ownership marker, but Vision can miss a
-            // tiny label. A clearly visible/colorful card is still allowed through
-            // so artwork recognition remains the primary collection scanner.
-            guard level != nil || unlockedVisualScore(in: card) >= 0.28 else {
+            let mastered = (level == 5) || hasMasteryCrown(in: card)
+            let visualScore = unlockedVisualScore(in: card)
+
+            // Do not call every unreadable card "locked". A very dark card is a
+            // credible locked slot; an ambiguous card becomes Needs Help so the
+            // overlay can ask for a retry/right-panel verification instead.
+            guard level != nil || mastered || visualScore >= 0.28 else {
+                if visualScore <= 0.10 {
+                    confidentLockedSlots.insert(slot)
+                } else {
+                    needsHelpSlots.insert(slot)
+                }
                 continue
             }
 
             guard let artwork = artworkCrop(from: card),
                   let feature = try featurePrint(for: artwork) else {
+                needsHelpSlots.insert(slot)
                 continue
             }
 
-            cards.append(CardFeature(slot: slot, level: level, feature: feature))
+            cards.append(CardFeature(slot: slot, level: level, mastered: mastered, feature: feature))
         }
 
         var detections: [DetectedSprite] = []
@@ -128,7 +140,7 @@ actor ScreenshotSpriteAnalyzer {
                     rarity: reference.item.rarity,
                     status: .collected,
                     level: card.level,
-                    mastered: card.level == 5,
+                    mastered: card.mastered,
                     timestamp: 0,
                     observations: 1,
                     catalogIndex: reference.catalogIndex,
@@ -193,7 +205,10 @@ actor ScreenshotSpriteAnalyzer {
         }
 
         let identifiedSlots = Set(unique.compactMap(\.gridSlot))
-        let lockedSlots = Set(0..<visibleSlots).subtracting(identifiedSlots)
+        let visibleSlotSet = Set(0..<visibleSlots)
+        let unresolvedSlots = visibleSlotSet.subtracting(identifiedSlots)
+        let lockedSlots = confidentLockedSlots.intersection(unresolvedSlots)
+        needsHelpSlots.formUnion(unresolvedSlots.subtracting(lockedSlots))
 
         if unique.isEmpty {
             onProgress(1.0, "Collection visible, but no unlocked Sprite details were readable yet.")
@@ -207,7 +222,67 @@ actor ScreenshotSpriteAnalyzer {
             visibleSlots: visibleSlots,
             inferredPageStart: pageStart,
             lockedSlots: lockedSlots,
+            needsHelpSlots: needsHelpSlots,
             selectedSpriteName: selectedSpriteName
+        )
+    }
+
+    /// Stronger second pass for one overlay card. This is intentionally only
+    /// invoked after a Needs Help card has been hovered for a moment.
+    func deepAnalyzeCard(image screenshot: CGImage, slot: Int) async throws -> DetectedSprite? {
+        guard (0..<12).contains(slot) else { return nil }
+        try Task.checkCancellation()
+
+        let viewport = contentViewport(in: screenshot)
+        let levels = try recognizedGridLevels(in: screenshot, viewport: viewport)
+        let rect = cardRect(for: slot, viewport: viewport)
+        guard let card = cropTopLeft(screenshot, to: rect) else { return nil }
+
+        let level = levels[slot]
+        let mastered = (level == 5) || hasMasteryCrown(in: card)
+        guard level != nil || mastered || unlockedVisualScore(in: card) >= 0.16 else { return nil }
+
+        let width = CGFloat(card.width)
+        let height = CGFloat(card.height)
+        let cropRects = [
+            CGRect(x: width * 0.07, y: height * 0.11, width: width * 0.86, height: height * 0.66),
+            CGRect(x: width * 0.04, y: height * 0.08, width: width * 0.92, height: height * 0.70),
+            CGRect(x: width * 0.10, y: height * 0.14, width: width * 0.80, height: height * 0.60)
+        ]
+
+        let references = try referenceFeatures(onProgress: { _, _ in })
+        guard !references.isEmpty else { return nil }
+        var bestByReference = Array(repeating: Float.greatestFiniteMagnitude, count: references.count)
+
+        for cropRect in cropRects {
+            guard let crop = cropTopLeft(card, to: cropRect),
+                  let feature = try featurePrint(for: crop) else { continue }
+            for (index, reference) in references.enumerated() {
+                let distance = try featureDistance(feature, reference.feature)
+                bestByReference[index] = min(bestByReference[index], distance)
+            }
+        }
+
+        let ranked = bestByReference.enumerated().sorted { $0.element < $1.element }
+        guard let best = ranked.first else { return nil }
+        let second = ranked.dropFirst().first?.element ?? .greatestFiniteMagnitude
+        // Require a real separation on this expensive second pass. The margin
+        // scales slightly with the feature distance so near-identical variants
+        // do not become false-positive ownership updates.
+        let requiredMargin = max(Float(0.08), best.element * 0.012)
+        guard second == .greatestFiniteMagnitude || second - best.element >= requiredMargin else { return nil }
+
+        let reference = references[best.offset]
+        return DetectedSprite(
+            name: reference.item.name,
+            rarity: reference.item.rarity,
+            status: .collected,
+            level: level,
+            mastered: mastered,
+            timestamp: 0,
+            observations: 1,
+            catalogIndex: reference.catalogIndex,
+            gridSlot: slot
         )
     }
 
@@ -311,13 +386,13 @@ actor ScreenshotSpriteAnalyzer {
 
         guard let item else { return nil }
 
-        var level: Int? = mastered ? 5 : nil
-        if level == nil {
-            for string in strings {
-                if let parsed = parseLevel(string) {
-                    level = parsed
-                    break
-                }
+        // Mastery and the current level are independent. A mastered Sprite can
+        // be Level 1 after it was lost, so "SPRITE MASTERED" must never force 5.
+        var level: Int?
+        for string in strings {
+            if let parsed = parseLevel(string) {
+                level = parsed
+                break
             }
         }
 
@@ -482,6 +557,40 @@ actor ScreenshotSpriteAnalyzer {
         return samples > 0 ? Double(visible) / Double(samples) : 0
     }
 
+    /// Fortnite keeps the mastery crown even when a previously mastered Sprite
+    /// returns to Level 1 after being lost. Detect the bright gold crown in the
+    /// lower-right status area independently from the OCR'd level.
+    private func hasMasteryCrown(in image: CGImage) -> Bool {
+        let width = CGFloat(image.width)
+        let height = CGFloat(image.height)
+        let crownRegion = CGRect(
+            x: width * 0.48,
+            y: height * 0.69,
+            width: width * 0.50,
+            height: height * 0.29
+        )
+        guard let crop = cropTopLeft(image, to: crownRegion),
+              let pixels = downsampleRGBA(crop, width: 36, height: 20) else { return false }
+
+        var gold = 0
+        var brightGold = 0
+        let sampleCount = 36 * 20
+        for index in 0..<sampleCount {
+            let i = index * 4
+            let r = Int(pixels[i])
+            let g = Int(pixels[i + 1])
+            let b = Int(pixels[i + 2])
+            if r >= 170, g >= 115, b <= 125, r > b + 55, g > b + 25 {
+                gold += 1
+                if r >= 215, g >= 165, b <= 95 { brightGold += 1 }
+            }
+        }
+
+        let ratio = Double(gold) / Double(sampleCount)
+        let brightRatio = Double(brightGold) / Double(sampleCount)
+        return ratio >= 0.035 && brightRatio >= 0.007
+    }
+
     private func distanceSquared(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
         let dx = lhs.x - rhs.x
         let dy = lhs.y - rhs.y
@@ -561,19 +670,25 @@ actor ScreenshotSpriteAnalyzer {
         references: [ReferenceFeature],
         scores: [[Float]]
     ) -> [Int?] {
-        let independent = scores.map { row -> Int? in
+        // A nearest neighbor by itself is not enough evidence. Similar variants
+        // can have almost identical feature prints, and the old code would still
+        // assign *something*, creating random 👍 cards. Keep the raw nearest
+        // candidate for page-sequence scoring, but only expose independent
+        // matches when the winner is meaningfully separated from runner-up.
+        let nearest = scores.map { row -> Int? in
             row.enumerated().min(by: { $0.element < $1.element })?.offset
         }
+        let confidentIndependent = scores.map { confidentNearestIndex(in: $0) }
 
         guard cards.count >= 2,
               references.count == catalog.count,
               let highestSlot = cards.map(\.slot).max() else {
-            return independent
+            return confidentIndependent
         }
 
         let independentMean: Float = scores.enumerated().reduce(Float(0)) { partial, pair in
             let (cardIndex, row) = pair
-            guard let referenceIndex = independent[cardIndex] else { return partial }
+            guard let referenceIndex = nearest[cardIndex] else { return partial }
             return partial + row[referenceIndex]
         } / Float(cards.count)
 
@@ -607,8 +722,17 @@ actor ScreenshotSpriteAnalyzer {
         let clearWinner = second == .greatestFiniteMagnitude
             || second - best.mean >= max(0.18, best.mean * 0.025)
 
-        guard nearIndependent, clearWinner else { return independent }
+        guard nearIndependent, clearWinner else { return confidentIndependent }
         return cards.map { best.start + $0.slot }
+    }
+
+    private func confidentNearestIndex(in row: [Float]) -> Int? {
+        let ranked = row.enumerated().sorted { $0.element < $1.element }
+        guard let best = ranked.first else { return nil }
+        guard let second = ranked.dropFirst().first else { return best.offset }
+        let margin = second.element - best.element
+        let requiredMargin = max(Float(0.10), best.element * 0.015)
+        return margin >= requiredMargin ? best.offset : nil
     }
 
     private func inferredPageStart(from detections: [DetectedSprite]) -> Int? {
@@ -805,6 +929,7 @@ actor ScreenshotSpriteAnalyzer {
 private struct CardFeature {
     let slot: Int
     let level: Int?
+    let mastered: Bool
     let feature: VNFeaturePrintObservation
 }
 

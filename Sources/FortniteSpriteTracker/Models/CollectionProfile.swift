@@ -26,7 +26,7 @@ struct CollectionProfile: Identifiable, Codable, Equatable, Sendable {
     }
 
     var masteredCount: Int {
-        sprites.filter { $0.level == 5 || $0.mastered }.count
+        sprites.filter(\.mastered).count
     }
 
     var lostCount: Int {

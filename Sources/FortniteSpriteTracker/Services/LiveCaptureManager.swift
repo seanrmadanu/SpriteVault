@@ -60,7 +60,7 @@ final class LiveCaptureManager: ObservableObject {
     @Published var targetProfileID: UUID? {
         didSet { lastDetectionSignature = "" }
     }
-    @Published var framesPerSecond = 2
+    @Published var framesPerSecond = 12
 
     @Published private(set) var systemSelection: SystemCaptureSelection?
     @Published private(set) var resolvedApplicationTarget: ResolvedCaptureTarget?
@@ -655,10 +655,10 @@ final class LiveCaptureManager: ObservableObject {
             }
 
             for change in summary.masteredSprites {
-                addSpriteActivity(kind: .mastered, title: "Sprite mastered 👑", message: "\(change.name) reached Level 5.", change: change)
+                addSpriteActivity(kind: .mastered, title: "Sprite mastered 👑", message: "\(change.name) has the mastery crown.", change: change)
                 notificationService.send(
                     title: "Sprite Mastered 👑",
-                    body: "\(change.name) reached Level 5 in \(profileName).",
+                    body: "\(change.name) is mastered in \(profileName).",
                     identifier: "sprite-mastered-\(notificationKey(change.name))",
                     spriteName: change.name
                 )
@@ -896,7 +896,7 @@ final class LiveCaptureManager: ObservableObject {
 
         let signature = analysis.detections
             .sorted { $0.name < $1.name }
-            .map { "\($0.name.lowercased())=\($0.status.rawValue)=\($0.level.map(String.init) ?? "?")" }
+            .map { "\($0.name.lowercased())=\($0.status.rawValue)=\($0.level.map(String.init) ?? "?")=\($0.mastered ? "M" : "N")" }
             .joined(separator: "|") + "@\(analysis.inferredPageStart ?? -1)"
 
         let isNewDetectionPage = signature != lastDetectionSignature

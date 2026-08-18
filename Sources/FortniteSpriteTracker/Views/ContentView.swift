@@ -396,7 +396,7 @@ struct ContentView: View {
                 Image(systemName: event.kind == .mastered ? "crown.fill" : event.kind == .owned ? "checkmark.circle.fill" : "minus.circle.fill")
                     .foregroundStyle(event.kind == .mastered ? .yellow : event.kind == .owned ? .green : .secondary)
                     .symbolEffect(.bounce, value: toastVisible)
-                Text(event.kind == .mastered ? "\(event.name) mastered - Level 5" : event.kind == .owned ? "\(event.name) added" : "\(event.name) removed")
+                Text(event.kind == .mastered ? "\(event.name) mastered" : event.kind == .owned ? "\(event.name) added" : "\(event.name) removed")
                     .fontWeight(.bold)
             }
             .padding(.horizontal, 18)
