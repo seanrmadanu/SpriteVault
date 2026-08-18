@@ -549,7 +549,8 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
                             inferredPageStart: nil,
                             lockedSlots: [],
                             needsHelpSlots: [],
-                            selectedSpriteName: detection.name
+                            selectedSpriteName: detection.name,
+                            cardAnchors: []
                         ))
                     }
                 } catch is CancellationError {
@@ -971,11 +972,22 @@ private enum SpriteOverlayCardState: Equatable {
     case needsHelp(promptForSelection: Bool)
     case locked
     case lost(name: String, level: Int?, mastered: Bool)
+
+    var isResolvedIdentity: Bool {
+        switch self {
+        case .recognized, .lost: return true
+        default: return false
+        }
+    }
 }
 
-// AppKit overlay state is only touched on the main thread. The capture service
-// itself is @unchecked Sendable because ScreenCaptureKit invokes callbacks on
-// its sample queue, so explicitly acknowledge that synchronization here too.
+private struct RememberedOverlayState {
+    let signature: UInt64
+    let state: SpriteOverlayCardState
+}
+
+// AppKit overlay state is touched on the main thread. ScreenCaptureKit invokes
+// its owner from a sample queue, so the controller is explicitly synchronized.
 private final class SpriteScanOverlayController: @unchecked Sendable {
     var onDeepScan: ((Int) -> Void)?
 
@@ -985,6 +997,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
     private var hoveredSlot: Int?
     private var hoverStartedAt: TimeInterval = 0
     private var deepScannedSlots = Set<Int>()
+    private var rememberedStates: [Int: RememberedOverlayState] = [:]
 
     deinit { hoverTimer?.invalidate() }
 
@@ -1035,6 +1048,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         hoverTimer = nil
         hoveredSlot = nil
         deepScannedSlots.removeAll()
+        rememberedStates.removeAll()
         panel?.orderOut(nil)
         panel = nil
         overlayView = nil
@@ -1043,32 +1057,57 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
     func showWaiting(message: String) {
         precondition(Thread.isMainThread)
         deepScannedSlots.removeAll()
+        hoveredSlot = nil
+        overlayView?.hoveredSlot = nil
         overlayView?.mode = .waiting
         overlayView?.statusText = message
+        overlayView?.cardAnchors = []
         overlayView?.cardStates = [:]
         overlayView?.needsDisplay = true
     }
 
     func showMoving() {
         precondition(Thread.isMainThread)
-        // Slot numbers are positional. Once the collection scrolls, slot 4 can
-        // contain a completely different Sprite, so retry history must reset.
+        // Do not leave a fixed stencil sitting over the game while Fortnite is
+        // scrolling. Keep remembered identities internally, hide the card boxes,
+        // then re-anchor them from the next stable frame.
         deepScannedSlots.removeAll()
         hoveredSlot = nil
         overlayView?.hoveredSlot = nil
         overlayView?.mode = .moving
-        overlayView?.statusText = "Scrolling…"
+        overlayView?.statusText = "Tracking scroll · aligning cards…"
+        overlayView?.cardAnchors = []
+        overlayView?.cardStates = [:]
         overlayView?.needsDisplay = true
     }
 
     func beginProcessing() {
         precondition(Thread.isMainThread)
-        var states: [Int: SpriteOverlayCardState] = [:]
-        for slot in 0..<12 { states[slot] = .processing }
-        overlayView?.mode = .collection
-        overlayView?.statusText = "Reading visible Sprites…"
-        overlayView?.cardStates = states
-        overlayView?.needsDisplay = true
+        guard let view = overlayView else { return }
+        guard !view.cardAnchors.isEmpty else {
+            view.mode = .waiting
+            view.statusText = "Collection found · aligning visible cards…"
+            view.needsDisplay = true
+            return
+        }
+
+        var states = view.cardStates
+        for anchor in view.cardAnchors {
+            if let current = states[anchor.slot], current.isResolvedIdentity {
+                continue
+            }
+            if let remembered = rememberedStates[anchor.slot],
+               signaturesMatch(remembered.signature, anchor.visualSignature),
+               remembered.state.isResolvedIdentity {
+                states[anchor.slot] = remembered.state
+            } else {
+                states[anchor.slot] = .processing
+            }
+        }
+        view.mode = .collection
+        view.statusText = "Reading aligned Sprite cards…"
+        view.cardStates = states
+        view.needsDisplay = true
     }
 
     func update(with analysis: SpriteFrameAnalysis) {
@@ -1077,60 +1116,102 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
             showWaiting(message: "Finding Sprite Collection…")
             return
         }
+        guard let view = overlayView else { return }
 
-        let visibleCount = max(0, min(analysis.visibleSlots, 12))
+        let anchors = analysis.cardAnchors.sorted { $0.slot < $1.slot }
+        view.cardAnchors = anchors
+
+        guard !anchors.isEmpty else {
+            view.mode = .waiting
+            view.statusText = "Collection found · aligning visible cards…"
+            view.cardStates = [:]
+            view.needsDisplay = true
+            return
+        }
+
+        let anchorBySlot = Dictionary(uniqueKeysWithValues: anchors.map { ($0.slot, $0) })
+
+        // Drop memory when the pixels in a slot clearly changed. This is what
+        // lets a deep-scan result survive repeated scans without attaching an
+        // old name to a different Sprite after the user scrolls.
+        let staleSlots = rememberedStates.compactMap { slot, remembered -> Int? in
+            guard let anchor = anchorBySlot[slot],
+                  signaturesMatch(remembered.signature, anchor.visualSignature) else {
+                return slot
+            }
+            return nil
+        }
+        for slot in staleSlots {
+            rememberedStates.removeValue(forKey: slot)
+            deepScannedSlots.remove(slot)
+        }
+
         var states: [Int: SpriteOverlayCardState] = [:]
-        for slot in 0..<visibleCount { states[slot] = .needsHelp(promptForSelection: false) }
-
-        for slot in analysis.lockedSlots where slot < visibleCount {
-            states[slot] = .locked
-        }
-        for slot in analysis.needsHelpSlots where slot < visibleCount {
-            states[slot] = .needsHelp(promptForSelection: deepScannedSlots.contains(slot))
-        }
-        for detection in analysis.detections {
-            guard let slot = detection.gridSlot, slot < 12 else { continue }
-            if detection.status == .lost {
-                states[slot] = .lost(
-                    name: detection.name,
-                    level: detection.level,
-                    mastered: detection.mastered
-                )
+        for anchor in anchors {
+            if let remembered = rememberedStates[anchor.slot],
+               signaturesMatch(remembered.signature, anchor.visualSignature),
+               remembered.state.isResolvedIdentity {
+                states[anchor.slot] = remembered.state
             } else {
-                states[slot] = .recognized(
-                    name: detection.name,
-                    level: detection.level,
-                    mastered: detection.mastered
-                )
+                states[anchor.slot] = .needsHelp(promptForSelection: false)
             }
         }
 
-        overlayView?.mode = .collection
-        overlayView?.statusText = analysis.detections.isEmpty
-            ? "Collection found · waiting for readable cards"
-            : "Collection found · \(analysis.detections.count) recognized"
-        overlayView?.cardStates = states
-        overlayView?.needsDisplay = true
+        for slot in analysis.lockedSlots where anchorBySlot[slot] != nil {
+            states[slot] = .locked
+        }
+        for slot in analysis.needsHelpSlots where anchorBySlot[slot] != nil {
+            // Never downgrade a remembered successful deep scan of the same card.
+            if states[slot]?.isResolvedIdentity != true {
+                states[slot] = .needsHelp(promptForSelection: deepScannedSlots.contains(slot))
+            }
+        }
+
+        for detection in analysis.detections {
+            guard let slot = detection.gridSlot,
+                  let anchor = anchorBySlot[slot] else { continue }
+            let state: SpriteOverlayCardState = detection.status == .lost
+                ? .lost(name: detection.name, level: detection.level, mastered: detection.mastered)
+                : .recognized(name: detection.name, level: detection.level, mastered: detection.mastered)
+            states[slot] = state
+            rememberedStates[slot] = RememberedOverlayState(
+                signature: anchor.visualSignature,
+                state: state
+            )
+        }
+
+        view.mode = .collection
+        view.statusText = analysis.detections.isEmpty
+            ? "Cards aligned · hover 👎 to retry"
+            : "Cards aligned · \(analysis.detections.count) recognized"
+        view.cardStates = states
+        view.needsDisplay = true
     }
 
     func finishDeepScan(slot: Int, detection: DetectedSprite?) {
         precondition(Thread.isMainThread)
         deepScannedSlots.insert(slot)
-        guard var states = overlayView?.cardStates else { return }
+        guard let view = overlayView else { return }
+        var states = view.cardStates
+
         if let detection {
-            states[slot] = detection.status == .lost
+            let state: SpriteOverlayCardState = detection.status == .lost
                 ? .lost(name: detection.name, level: detection.level, mastered: detection.mastered)
                 : .recognized(name: detection.name, level: detection.level, mastered: detection.mastered)
+            states[slot] = state
+            if let anchor = view.cardAnchors.first(where: { $0.slot == slot }) {
+                rememberedStates[slot] = RememberedOverlayState(
+                    signature: anchor.visualSignature,
+                    state: state
+                )
+            }
+            view.statusText = "Recognized \(detection.name)"
         } else {
             states[slot] = .needsHelp(promptForSelection: true)
+            view.statusText = "Needs help · select this Sprite in Fortnite"
         }
-        overlayView?.cardStates = states
-        if let detection {
-            overlayView?.statusText = "Deep scan recognized \(detection.name)"
-        } else {
-            overlayView?.statusText = "Needs help · select this Sprite in Fortnite"
-        }
-        overlayView?.needsDisplay = true
+        view.cardStates = states
+        view.needsDisplay = true
     }
 
     private func startHoverTracking() {
@@ -1170,7 +1251,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         deepScannedSlots.insert(slot)
         view.cardStates[slot] = .processing
         view.hoveredSlot = slot
-        view.statusText = "Deep scanning card \(slot + 1)…"
+        view.statusText = "Deep scanning this Sprite…"
         view.needsDisplay = true
         onDeepScan?(slot)
     }
@@ -1181,6 +1262,11 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         overlayView?.hoveredSlot = nil
         overlayView?.needsDisplay = true
     }
+
+    private func signaturesMatch(_ lhs: UInt64, _ rhs: UInt64) -> Bool {
+        guard lhs != 0, rhs != 0 else { return lhs == rhs }
+        return (lhs ^ rhs).nonzeroBitCount <= 10
+    }
 }
 
 private final class SpriteScanOverlayView: NSView {
@@ -1189,6 +1275,7 @@ private final class SpriteScanOverlayView: NSView {
     var mode: Mode = .waiting
     var statusText = "Finding Sprite Collection…"
     var cardStates: [Int: SpriteOverlayCardState] = [:]
+    var cardAnchors: [SpriteCardAnchor] = []
     var hoveredSlot: Int?
 
     private let magenta = NSColor(calibratedRed: 1.0, green: 0.10, blue: 0.72, alpha: 1.0)
@@ -1200,80 +1287,115 @@ private final class SpriteScanOverlayView: NSView {
         super.draw(dirtyRect)
         guard !bounds.isEmpty else { return }
 
-        if mode == .collection || mode == .moving {
-            drawCardGrid()
-            drawRightPanelGuide()
+        // Moving mode intentionally shows no stale boxes. They reappear only
+        // after the analyzer has actively re-aligned to the current card rows.
+        if mode == .collection {
+            drawAlignedCards()
         }
         drawStatusPill()
     }
 
     func cardSlot(at point: CGPoint) -> Int? {
-        for slot in 0..<12 where cardRect(slot: slot).contains(point) {
-            return slot
+        for anchor in cardAnchors where cardRect(for: anchor).contains(point) {
+            return anchor.slot
         }
         return nil
     }
 
-    private func drawCardGrid() {
-        let alpha: CGFloat = mode == .moving ? 0.34 : 0.96
-        for slot in 0..<12 {
-            let rect = cardRect(slot: slot)
+    private func drawAlignedCards() {
+        for anchor in cardAnchors {
+            let slot = anchor.slot
+            let rect = cardRect(for: anchor)
+            guard rect.width >= 16, rect.height >= 16 else { continue }
+
             let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
-            magenta.withAlphaComponent(alpha).setStroke()
-            path.lineWidth = hoveredSlot == slot ? 3.0 : 2.0
+            magenta.withAlphaComponent(hoveredSlot == slot ? 1.0 : 0.88).setStroke()
+            path.lineWidth = hoveredSlot == slot ? 2.6 : 1.8
             path.stroke()
 
-            guard mode == .collection, let state = cardStates[slot] else { continue }
-            drawBadge(state: state, in: rect, slot: slot)
+            guard let state = cardStates[slot] else { continue }
+            drawState(state, in: rect, slot: slot)
         }
     }
 
-    private func drawBadge(state: SpriteOverlayCardState, in card: CGRect, slot: Int) {
-        let text: String
-        let fill: NSColor
+    private func drawState(_ state: SpriteOverlayCardState, in card: CGRect, slot: Int) {
+        let badgeText: String
         switch state {
         case .processing:
-            text = "•••"
-            fill = NSColor.black.withAlphaComponent(0.78)
+            badgeText = "•••"
         case let .recognized(_, level, mastered):
-            let levelText = level.map { " L\($0)" } ?? ""
-            text = "👍\(levelText)\(mastered ? " 👑" : "")"
-            fill = NSColor.black.withAlphaComponent(0.80)
+            badgeText = "👍\(level.map { " L\($0)" } ?? "")\(mastered ? " 👑" : "")"
         case let .needsHelp(prompt):
-            text = prompt ? "👎 SELECT" : "👎"
-            fill = NSColor.black.withAlphaComponent(0.82)
+            badgeText = prompt ? "👎 SELECT" : "👎"
         case .locked:
-            text = "🔒"
-            fill = NSColor.black.withAlphaComponent(0.76)
+            badgeText = "🔒"
         case let .lost(_, level, mastered):
-            let levelText = level.map { " L\($0)" } ?? ""
-            text = "LOST\(levelText)\(mastered ? " 👑" : "")"
-            fill = NSColor.black.withAlphaComponent(0.82)
+            badgeText = "LOST\(level.map { " L\($0)" } ?? "")\(mastered ? " 👑" : "")"
+        }
+        drawBadge(text: badgeText, in: card)
+
+        switch state {
+        case let .recognized(name, _, _), let .lost(name, _, _):
+            drawName(name, in: card)
+        default:
+            break
         }
 
-        let font = NSFont.systemFont(ofSize: max(10, min(13, card.width * 0.10)), weight: .bold)
+        if case .needsHelp = state, hoveredSlot == slot {
+            drawHelpText(for: state, card: card)
+        }
+    }
+
+    private func drawBadge(text: String, in card: CGRect) {
+        let font = NSFont.systemFont(ofSize: max(9, min(11.5, card.width * 0.075)), weight: .bold)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor.white
         ]
         let size = text.size(withAttributes: attributes)
-        let badgeWidth = min(card.width - 8, size.width + 12)
+        let badgeWidth = min(card.width - 8, size.width + 10)
         let badge = CGRect(
             x: card.maxX - badgeWidth - 4,
-            y: card.maxY - size.height - 12,
+            y: card.maxY - size.height - 10,
             width: badgeWidth,
-            height: size.height + 8
+            height: size.height + 6
         )
-        fill.setFill()
+        NSColor.black.withAlphaComponent(0.78).setFill()
         NSBezierPath(roundedRect: badge, xRadius: badge.height / 2, yRadius: badge.height / 2).fill()
-        text.draw(
-            at: CGPoint(x: badge.minX + 6, y: badge.minY + 4),
+        text.draw(at: CGPoint(x: badge.minX + 5, y: badge.minY + 3), withAttributes: attributes)
+    }
+
+    private func drawName(_ name: String, in card: CGRect) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byWordWrapping
+
+        let font = NSFont.systemFont(ofSize: max(9, min(11.5, card.width * 0.073)), weight: .bold)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: paragraph
+        ]
+
+        let textWidth = max(card.width - 12, 20)
+        let measured = (name as NSString).boundingRect(
+            with: CGSize(width: textWidth, height: 80),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attributes
+        )
+        let height = min(max(18, ceil(measured.height) + 8), min(card.height * 0.34, 42))
+        let plate = CGRect(
+            x: card.minX + 4,
+            y: card.minY + 4,
+            width: card.width - 8,
+            height: height
+        )
+        NSColor.black.withAlphaComponent(0.76).setFill()
+        NSBezierPath(roundedRect: plate, xRadius: 5, yRadius: 5).fill()
+        (name as NSString).draw(
+            in: plate.insetBy(dx: 4, dy: 4),
             withAttributes: attributes
         )
-
-        if case .needsHelp = state, hoveredSlot == slot {
-            drawHelpText(for: state, card: card)
-        }
     }
 
     private func drawHelpText(for state: SpriteOverlayCardState, card: CGRect) {
@@ -1292,26 +1414,6 @@ private final class SpriteScanOverlayView: NSView {
         var attrs = attributes
         attrs[.paragraphStyle] = paragraph
         message.draw(in: textRect.insetBy(dx: 6, dy: 6), withAttributes: attrs)
-    }
-
-    private func drawRightPanelGuide() {
-        let viewport = viewportRect
-        let topLeft = CGRect(
-            x: viewport.minX + viewport.width * 0.655,
-            y: viewport.minY + viewport.height * 0.455,
-            width: viewport.width * 0.285,
-            height: viewport.height * 0.270
-        )
-        let rect = CGRect(
-            x: topLeft.minX,
-            y: viewport.maxY - (topLeft.minY - viewport.minY) - topLeft.height,
-            width: topLeft.width,
-            height: topLeft.height
-        )
-        magenta.withAlphaComponent(mode == .moving ? 0.18 : 0.38).setStroke()
-        let path = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
-        path.lineWidth = 1.2
-        path.stroke()
     }
 
     private func drawStatusPill() {
@@ -1341,35 +1443,12 @@ private final class SpriteScanOverlayView: NSView {
         statusText.draw(in: rect.insetBy(dx: 10, dy: 8), withAttributes: attrs)
     }
 
-    private var viewportRect: CGRect {
-        let targetAspect: CGFloat = 16.0 / 9.0
-        let currentAspect = bounds.width / max(bounds.height, 1)
-        if currentAspect > targetAspect {
-            let width = bounds.height * targetAspect
-            return CGRect(x: (bounds.width - width) / 2, y: 0, width: width, height: bounds.height)
-        }
-        let height = bounds.width / targetAspect
-        return CGRect(x: 0, y: (bounds.height - height) / 2, width: bounds.width, height: height)
-    }
-
-    private func cardRect(slot: Int) -> CGRect {
-        let viewport = viewportRect
-        let column = slot % 3
-        let row = slot / 3
-        let firstColumnCenter: CGFloat = 0.118
-        let columnStep: CGFloat = 0.080
-        let firstRowTop: CGFloat = 0.232
-        let rowStep: CGFloat = 0.180
-        let cardWidth: CGFloat = 0.079
-        let cardHeight: CGFloat = 0.166
-
-        let normalizedX = firstColumnCenter + CGFloat(column) * columnStep - cardWidth / 2
-        let normalizedTop = firstRowTop + CGFloat(row) * rowStep
-        let width = viewport.width * cardWidth
-        let height = viewport.height * cardHeight
+    private func cardRect(for anchor: SpriteCardAnchor) -> CGRect {
+        let width = bounds.width * CGFloat(anchor.width)
+        let height = bounds.height * CGFloat(anchor.height)
         return CGRect(
-            x: viewport.minX + viewport.width * normalizedX,
-            y: viewport.maxY - viewport.height * normalizedTop - height,
+            x: bounds.minX + bounds.width * CGFloat(anchor.x),
+            y: bounds.maxY - bounds.height * CGFloat(anchor.y) - height,
             width: width,
             height: height
         )

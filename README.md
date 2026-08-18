@@ -148,3 +148,14 @@ To make Screen Recording/Camera approval survive source-code updates, run the ap
 
 Do not add an automatic `tccutil reset` on app quit. That is a development shell utility, not an app permission-revocation API, and it would force a fresh approval every launch instead of solving the update problem.
 
+
+## Active overlay alignment update (Aug 18, 2026)
+
+- The live magenta overlay no longer draws a permanent hard-coded 3x4 stencil.
+- The analyzer OCRs the visible level labels and uses them as row anchors to calibrate the card rectangles in the current stable frame.
+- Partial rows at the top/bottom are ignored when they are not fully visible.
+- While the collection is scrolling, card boxes are hidden and the overlay shows an alignment status. The boxes reappear only after the new visible rows are grounded.
+- Recognized cards now display the Sprite name inside the card overlay in addition to the level/mastery status badge.
+- Successful card results are remembered using a small visual artwork signature. A later normal scan does not erase a successful deep-scan result for the same visible card.
+- When scrolling changes the pixels in a slot, the remembered label is discarded instead of being attached to the new Sprite.
+- The large right-panel magenta rectangle was removed from the visible overlay. Right-panel OCR remains active internally as the fallback verification source.

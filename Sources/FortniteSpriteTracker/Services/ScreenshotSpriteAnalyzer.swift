@@ -50,15 +50,15 @@ actor ScreenshotSpriteAnalyzer {
         try Task.checkCancellation()
         let viewport = contentViewport(in: screenshot)
 
-        // Do not make one fragile OCR crop the gatekeeper for the entire scan.
-        // The header, right details panel, and several visible level labels are
-        // independent pieces of evidence that this is the Sprite Collection.
-        onProgress(0.03, "Calibrating the Fortnite collection layout…")
+        // Calibrate the grid from what Fortnite is actually drawing instead of
+        // assuming a permanent 3x4 stencil. The level labels are excellent row
+        // anchors and move with the cards while scrolling.
+        onProgress(0.03, "Calibrating the visible Sprite cards…")
         let headerConfirmed = try isCollectionScreen(screenshot, viewport: viewport)
         let detail = try recognizedRightPanel(in: screenshot, viewport: viewport)
-        let levelsBySlot = try recognizedGridLevels(in: screenshot, viewport: viewport)
+        let grid = try recognizedGridLayout(in: screenshot, viewport: viewport)
 
-        let collectionConfirmed = headerConfirmed || detail != nil || levelsBySlot.count >= 2
+        let collectionConfirmed = headerConfirmed || detail != nil || grid.levelsBySlot.count >= 2
         guard collectionConfirmed else {
             onProgress(1.0, "Waiting for the Fortnite Sprites Collection screen…")
             return SpriteFrameAnalysis(
@@ -68,29 +68,29 @@ actor ScreenshotSpriteAnalyzer {
                 inferredPageStart: nil,
                 lockedSlots: [],
                 needsHelpSlots: [],
-                selectedSpriteName: nil
+                selectedSpriteName: nil,
+                cardAnchors: []
             )
         }
 
+        let cardRects = grid.rects
         var cards: [CardFeature] = []
         var selectionCandidates: [(slot: Int, score: Double)] = []
         var confidentLockedSlots = Set<Int>()
         var needsHelpSlots = Set<Int>()
-        onProgress(0.16, "Matching the visible Sprite cards…")
+        onProgress(0.16, grid.isCalibrated ? "Aligned to the visible Sprite rows…" : "Matching the visible Sprite cards…")
 
-        for slot in 0..<12 {
+        for (slot, rect) in cardRects.enumerated() {
             try Task.checkCancellation()
-            let rect = cardRect(for: slot, viewport: viewport)
             guard let card = cropTopLeft(screenshot, to: rect) else { continue }
             selectionCandidates.append((slot, selectionScore(in: card)))
 
-            let level = levelsBySlot[slot]
+            let level = grid.levelsBySlot[slot]
+            // Mastery is permanent state. Level 5 is enough to establish it,
+            // but a crown keeps mastery true at Level 1-4 after a Sprite is lost.
             let mastered = (level == 5) || hasMasteryCrown(in: card)
             let visualScore = unlockedVisualScore(in: card)
 
-            // Do not call every unreadable card "locked". A very dark card is a
-            // credible locked slot; an ambiguous card becomes Needs Help so the
-            // overlay can ask for a retry/right-panel verification instead.
             guard level != nil || mastered || visualScore >= 0.28 else {
                 if visualScore <= 0.10 {
                     confidentLockedSlots.insert(slot)
@@ -151,10 +151,8 @@ actor ScreenshotSpriteAnalyzer {
 
         var selectedSpriteName: String?
         if let detail {
-            // Right-panel OCR is an independent fallback. Do not throw away a
-            // perfectly readable Sprite name just because the selected-card
-            // highlight could not be located in the left grid. That was one of
-            // the reasons live recognition could appear to do nothing.
+            // The right panel remains an independent source of truth. Its name
+            // can confirm a card even when artwork matching is ambiguous.
             let selectedSlot = bestSelectedSlot(selectionCandidates)
             selectedSpriteName = detail.item.name
 
@@ -173,9 +171,6 @@ actor ScreenshotSpriteAnalyzer {
                 gridSlot: selectedSlot
             )
 
-            // The right-side title is stronger evidence than artwork matching.
-            // Replace an uncertain visual match occupying the selected card when
-            // we know the slot; otherwise still merge it by catalog identity.
             if let selectedSlot {
                 detections.removeAll {
                     $0.gridSlot == selectedSlot || normalize($0.name) == normalize(detail.item.name)
@@ -186,8 +181,6 @@ actor ScreenshotSpriteAnalyzer {
             detections.append(selectedDetection)
         }
 
-        // A screenshot cannot legitimately contain the same catalog identity in
-        // two slots. Right-panel detections were appended last, so prefer them.
         var byName: [String: DetectedSprite] = [:]
         for detection in detections {
             byName[normalize(detection.name)] = detection
@@ -197,21 +190,29 @@ actor ScreenshotSpriteAnalyzer {
         }
 
         let pageStart = inferredPageStart(from: unique)
-        let visibleSlots: Int
-        if let pageStart {
-            visibleSlots = max(0, min(12, catalog.count - pageStart))
-        } else {
-            visibleSlots = 12
-        }
-
+        let visibleSlots = cardRects.count
         let identifiedSlots = Set(unique.compactMap(\.gridSlot))
         let visibleSlotSet = Set(0..<visibleSlots)
         let unresolvedSlots = visibleSlotSet.subtracting(identifiedSlots)
         let lockedSlots = confidentLockedSlots.intersection(unresolvedSlots)
         needsHelpSlots.formUnion(unresolvedSlots.subtracting(lockedSlots))
 
+        let anchors: [SpriteCardAnchor]
+        if grid.isCalibrated {
+            anchors = cardRects.enumerated().compactMap { slot, rect in
+                guard let card = cropTopLeft(screenshot, to: rect) else { return nil }
+                return makeCardAnchor(slot: slot, rect: rect, card: card, image: screenshot)
+            }
+        } else {
+            // Do not draw a guessed stencil. Recognition may still use the old
+            // fallback crops, but the overlay waits until geometry is grounded.
+            anchors = []
+        }
+
         if unique.isEmpty {
-            onProgress(1.0, "Collection visible, but no unlocked Sprite details were readable yet.")
+            onProgress(1.0, grid.isCalibrated
+                ? "Cards aligned, but no unlocked Sprite details were readable yet."
+                : "Collection visible; waiting for enough card anchors to align the overlay.")
         } else {
             onProgress(1.0, "Matched \(unique.count) unlocked Sprite\(unique.count == 1 ? "" : "s") in this stable view.")
         }
@@ -223,22 +224,23 @@ actor ScreenshotSpriteAnalyzer {
             inferredPageStart: pageStart,
             lockedSlots: lockedSlots,
             needsHelpSlots: needsHelpSlots,
-            selectedSpriteName: selectedSpriteName
+            selectedSpriteName: selectedSpriteName,
+            cardAnchors: anchors
         )
     }
 
     /// Stronger second pass for one overlay card. This is intentionally only
     /// invoked after a Needs Help card has been hovered for a moment.
     func deepAnalyzeCard(image screenshot: CGImage, slot: Int) async throws -> DetectedSprite? {
-        guard (0..<12).contains(slot) else { return nil }
         try Task.checkCancellation()
 
         let viewport = contentViewport(in: screenshot)
-        let levels = try recognizedGridLevels(in: screenshot, viewport: viewport)
-        let rect = cardRect(for: slot, viewport: viewport)
+        let grid = try recognizedGridLayout(in: screenshot, viewport: viewport)
+        guard grid.rects.indices.contains(slot) else { return nil }
+        let rect = grid.rects[slot]
         guard let card = cropTopLeft(screenshot, to: rect) else { return nil }
 
-        let level = levels[slot]
+        let level = grid.levelsBySlot[slot]
         let mastered = (level == 5) || hasMasteryCrown(in: card)
         guard level != nil || mastered || unlockedVisualScore(in: card) >= 0.16 else { return nil }
 
@@ -401,44 +403,169 @@ actor ScreenshotSpriteAnalyzer {
 
     /// One OCR request for all twelve cards instead of twelve independent Vision
     /// requests. The observations are mapped back onto the regular 3x4 grid.
-    private func recognizedGridLevels(in screenshot: CGImage, viewport: CGRect) throws -> [Int: Int] {
-        let rects = (0..<12).map { cardRect(for: $0, viewport: viewport) }
-        guard var gridRect = rects.first else { return [:] }
-        for rect in rects.dropFirst() { gridRect = gridRect.union(rect) }
-        gridRect = gridRect.insetBy(dx: -viewport.width * 0.008, dy: -viewport.height * 0.010)
-
-        guard let rawGrid = cropTopLeft(screenshot, to: gridRect),
-              let grid = preparedTextImage(rawGrid, targetWidth: 1050) else { return [:] }
+    /// Finds the rows that Fortnite is actually drawing. We use the level
+    /// labels as anchors because they move with the cards while the collection
+    /// scrolls. If calibration is not confident we keep the old crops only for
+    /// recognition and deliberately return no overlay anchors.
+    private func recognizedGridLayout(in screenshot: CGImage, viewport: CGRect) throws -> GridLayout {
+        let searchRect = CGRect(
+            x: viewport.minX + viewport.width * 0.045,
+            y: viewport.minY + viewport.height * 0.16,
+            width: viewport.width * 0.30,
+            height: viewport.height * 0.78
+        )
+        guard let rawGrid = cropTopLeft(screenshot, to: searchRect),
+              let gridImage = preparedTextImage(rawGrid, targetWidth: 1100) else {
+            return fallbackGridLayout(viewport: viewport, observations: [])
+        }
 
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
-        request.minimumTextHeight = 0.018
+        request.minimumTextHeight = 0.015
         request.customWords = (1...5).flatMap { ["Lvl \($0)", "Level \($0)"] }
 
-        let handler = VNImageRequestHandler(cgImage: grid, options: [:])
+        let handler = VNImageRequestHandler(cgImage: gridImage, options: [:])
         try handler.perform([request])
 
-        var result: [Int: Int] = [:]
+        var observations: [GridLevelObservation] = []
         for observation in request.results ?? [] {
             guard let level = observation.topCandidates(3).compactMap({ parseLevel($0.string) }).first else {
                 continue
             }
-
             let point = CGPoint(
-                x: gridRect.minX + observation.boundingBox.midX * gridRect.width,
-                y: gridRect.minY + (1 - observation.boundingBox.midY) * gridRect.height
+                x: searchRect.minX + observation.boundingBox.midX * searchRect.width,
+                y: searchRect.minY + (1 - observation.boundingBox.midY) * searchRect.height
             )
+            observations.append(GridLevelObservation(level: level, point: point))
+        }
 
-            let slot = rects.enumerated().min { lhs, rhs in
-                distanceSquared(point, CGPoint(x: lhs.element.midX, y: lhs.element.midY)) < distanceSquared(point, CGPoint(x: rhs.element.midX, y: rhs.element.midY))
-            }?.offset
+        let cardWidth = viewport.width * 0.076
+        let cardHeight = viewport.height * 0.145
+        let defaultRowStep = viewport.height * 0.180
+        let rowThreshold = viewport.height * 0.045
 
-            if let slot, rects[slot].insetBy(dx: -rects[slot].width * 0.25, dy: -rects[slot].height * 0.20).contains(point) {
-                result[slot] = max(result[slot] ?? 0, level)
+        // Cluster OCR anchors into rows. Two labels in a row are enough to trust
+        // its geometry; a single isolated OCR result is too easy to misplace.
+        var rowGroups: [[GridLevelObservation]] = []
+        for observation in observations.sorted(by: { $0.point.y < $1.point.y }) {
+            if let index = rowGroups.indices.last,
+               let meanY = meanRowY(rowGroups[index]),
+               abs(observation.point.y - meanY) <= rowThreshold {
+                rowGroups[index].append(observation)
+            } else {
+                rowGroups.append([observation])
             }
         }
-        return result
+
+        var rowTops = rowGroups
+            .filter { $0.count >= 2 }
+            .compactMap { group -> CGFloat? in
+                guard let levelY = meanRowY(group) else { return nil }
+                // Fortnite's level strip sits close to the bottom of the card.
+                return levelY - cardHeight * 0.86
+            }
+            .sorted()
+
+        // If an entire middle row is locked it may have no Lvl text. Fill only
+        // obvious one-row gaps between two grounded rows; never invent rows at
+        // the top/bottom of the screen.
+        if rowTops.count >= 2 {
+            var filled: [CGFloat] = []
+            for index in rowTops.indices {
+                filled.append(rowTops[index])
+                guard index < rowTops.count - 1 else { continue }
+                let gap = rowTops[index + 1] - rowTops[index]
+                if gap > defaultRowStep * 1.55 && gap < defaultRowStep * 2.45 {
+                    filled.append(rowTops[index] + defaultRowStep)
+                }
+            }
+            rowTops = filled.sorted()
+        }
+
+        let minimumTop = viewport.minY + viewport.height * 0.235
+        let maximumBottom = viewport.maxY - viewport.height * 0.055
+        rowTops = rowTops.filter { top in
+            top >= minimumTop && top + cardHeight <= maximumBottom
+        }
+
+        guard !rowTops.isEmpty else {
+            return fallbackGridLayout(viewport: viewport, observations: observations)
+        }
+
+        // Horizontal card spacing is stable, but compensate for small window /
+        // capture offsets using the OCR labels themselves.
+        let expectedCenters = (0..<3).map { column in
+            viewport.minX + viewport.width * (firstColumnCenter + CGFloat(column) * columnStep)
+        }
+        var shifts: [CGFloat] = []
+        for observation in observations {
+            let estimatedCenter = observation.point.x + cardWidth * 0.30
+            if let expected = expectedCenters.min(by: { abs($0 - estimatedCenter) < abs($1 - estimatedCenter) }) {
+                shifts.append(estimatedCenter - expected)
+            }
+        }
+        let horizontalShift = median(shifts).map {
+            min(max($0, -viewport.width * 0.025), viewport.width * 0.025)
+        } ?? 0
+
+        var rects: [CGRect] = []
+        rects.reserveCapacity(rowTops.count * 3)
+        for top in rowTops {
+            for expectedCenter in expectedCenters {
+                rects.append(CGRect(
+                    x: expectedCenter + horizontalShift - cardWidth / 2,
+                    y: top,
+                    width: cardWidth,
+                    height: cardHeight
+                ))
+            }
+        }
+
+        var levelsBySlot: [Int: Int] = [:]
+        for observation in observations {
+            guard let slot = nearestSlot(to: observation.point, in: rects) else { continue }
+            let expanded = rects[slot].insetBy(dx: -cardWidth * 0.20, dy: -cardHeight * 0.16)
+            guard expanded.contains(observation.point) else { continue }
+            levelsBySlot[slot] = max(levelsBySlot[slot] ?? 0, observation.level)
+        }
+
+        return GridLayout(rects: rects, levelsBySlot: levelsBySlot, isCalibrated: true)
+    }
+
+    private func fallbackGridLayout(
+        viewport: CGRect,
+        observations: [GridLevelObservation]
+    ) -> GridLayout {
+        let rects = (0..<12).map { cardRect(for: $0, viewport: viewport) }
+        var levelsBySlot: [Int: Int] = [:]
+        for observation in observations {
+            guard let slot = nearestSlot(to: observation.point, in: rects) else { continue }
+            levelsBySlot[slot] = max(levelsBySlot[slot] ?? 0, observation.level)
+        }
+        return GridLayout(rects: rects, levelsBySlot: levelsBySlot, isCalibrated: false)
+    }
+
+    private func nearestSlot(to point: CGPoint, in rects: [CGRect]) -> Int? {
+        rects.enumerated().min { lhs, rhs in
+            distanceSquared(point, CGPoint(x: lhs.element.midX, y: lhs.element.midY))
+                < distanceSquared(point, CGPoint(x: rhs.element.midX, y: rhs.element.midY))
+        }?.offset
+    }
+
+    private func meanRowY(_ observations: [GridLevelObservation]) -> CGFloat? {
+        guard !observations.isEmpty else { return nil }
+        return observations.reduce(CGFloat(0)) { $0 + $1.point.y } / CGFloat(observations.count)
+    }
+
+    private func median(_ values: [CGFloat]) -> CGFloat? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[middle - 1] + sorted[middle]) / 2
+        }
+        return sorted[middle]
     }
 
     private func parseLevel(_ value: String) -> Int? {
@@ -829,6 +956,48 @@ actor ScreenshotSpriteAnalyzer {
         return ciContext.createCGImage(source.cropped(to: ciRect), from: ciRect)
     }
 
+    private func makeCardAnchor(
+        slot: Int,
+        rect: CGRect,
+        card: CGImage,
+        image: CGImage
+    ) -> SpriteCardAnchor {
+        let imageWidth = max(Double(image.width), 1)
+        let imageHeight = max(Double(image.height), 1)
+        return SpriteCardAnchor(
+            slot: slot,
+            x: Double(rect.minX) / imageWidth,
+            y: Double(rect.minY) / imageHeight,
+            width: Double(rect.width) / imageWidth,
+            height: Double(rect.height) / imageHeight,
+            visualSignature: visualSignature(in: card)
+        )
+    }
+
+    /// Tiny average-hash from the inner artwork. It ignores the selection border
+    /// and level strip, so changing the Fortnite highlight does not make the
+    /// overlay forget a card it already identified.
+    private func visualSignature(in card: CGImage) -> UInt64 {
+        guard let artwork = artworkCrop(from: card),
+              let pixels = downsampleRGBA(artwork, width: 8, height: 8) else { return 0 }
+
+        var luminance = [Int]()
+        luminance.reserveCapacity(64)
+        for index in 0..<64 {
+            let offset = index * 4
+            let r = Int(pixels[offset])
+            let g = Int(pixels[offset + 1])
+            let b = Int(pixels[offset + 2])
+            luminance.append((r * 30 + g * 59 + b * 11) / 100)
+        }
+        let average = luminance.reduce(0, +) / max(luminance.count, 1)
+        var hash: UInt64 = 0
+        for (index, value) in luminance.enumerated() where value >= average {
+            hash |= UInt64(1) << UInt64(index)
+        }
+        return hash
+    }
+
     private func contentViewport(in image: CGImage) -> CGRect {
         let sampleWidth = 256
         let sampleHeight = max(96, Int(
@@ -924,6 +1093,17 @@ actor ScreenshotSpriteAnalyzer {
         if text.hasPrefix("ofoil") { text = "hol" + text }
         return text
     }
+}
+
+private struct GridLevelObservation {
+    let level: Int
+    let point: CGPoint
+}
+
+private struct GridLayout {
+    let rects: [CGRect]
+    let levelsBySlot: [Int: Int]
+    let isCalibrated: Bool
 }
 
 private struct CardFeature {

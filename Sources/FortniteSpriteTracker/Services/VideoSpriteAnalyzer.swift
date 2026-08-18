@@ -19,6 +19,18 @@ struct DetectedSprite: Identifiable, Hashable, Sendable {
     var owned: Bool { status.isUnlocked }
 }
 
+struct SpriteCardAnchor: Hashable, Sendable {
+    let slot: Int
+    /// Rectangle normalized to the captured frame using top-left coordinates.
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+    /// Small perceptual hash of the card artwork. Used only to keep overlay
+    /// labels attached to the same visible card across repeated scans.
+    let visualSignature: UInt64
+}
+
 struct SpriteFrameAnalysis: Sendable {
     let detections: [DetectedSprite]
     let isCollectionScreen: Bool
@@ -27,6 +39,7 @@ struct SpriteFrameAnalysis: Sendable {
     let lockedSlots: Set<Int>
     let needsHelpSlots: Set<Int>
     let selectedSpriteName: String?
+    let cardAnchors: [SpriteCardAnchor]
 }
 
 actor VideoSpriteAnalyzer {
