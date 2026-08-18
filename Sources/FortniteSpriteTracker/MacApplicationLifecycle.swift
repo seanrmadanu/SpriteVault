@@ -18,8 +18,14 @@ final class MacApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Keep the menu-bar companion alive when the main Sprite Vault window is closed.
-        false
+        // During development, closing the main Sprite Vault window should fully
+        // terminate the process. This immediately tears down ScreenCaptureKit /
+        // camera sessions instead of leaving the menu-bar companion alive.
+        //
+        // macOS privacy grants themselves are managed by TCC and intentionally
+        // persist after an app quits; the app cannot revoke those grants through
+        // a supported public API.
+        true
     }
 }
 

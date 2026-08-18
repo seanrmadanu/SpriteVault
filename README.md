@@ -133,3 +133,18 @@ The Xcode app target includes the required usage strings and camera entitlement.
 ## Development note
 
 `Package.swift` remains in the repository as a fallback/source-layout convenience, but normal testing should use the included `.xcodeproj` app target. The source has been syntax-parsed in the provided build environment; ScreenCaptureKit, AVFoundation device capture, UserNotifications, and SwiftUI/AppKit runtime behavior still need to be exercised on macOS in Xcode.
+## Development signing and macOS privacy permissions
+
+Sprite Vault now fully quits when its last main window closes, so active screen/camera capture ends with the app process. macOS intentionally keeps the user's Privacy & Security approval after an app quits.
+
+To make Screen Recording/Camera approval survive source-code updates, run the app with a stable Apple-issued signing identity rather than **Sign to Run Locally** / ad-hoc signing:
+
+1. Open `FortniteSpriteTracker.xcodeproj`.
+2. Select the **SpriteVault** target → **Signing & Capabilities**.
+3. Leave **Automatically manage signing** enabled.
+4. Choose your Apple ID's **Personal Team** (or your paid Developer Team) under **Team**.
+5. Keep the bundle identifier as `com.spritevault.FortniteSpriteTracker`.
+6. Build and approve Screen Recording once. Subsequent builds signed by the same team + bundle identifier should be recognized as the same app identity by macOS.
+
+Do not add an automatic `tccutil reset` on app quit. That is a development shell utility, not an app permission-revocation API, and it would force a fresh approval every launch instead of solving the update problem.
+
