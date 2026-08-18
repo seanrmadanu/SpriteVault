@@ -415,7 +415,10 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
 
         switch filter.style {
         case .window:
-            if let window = filter.includedWindows.first {
+            // `includedWindows` was added in macOS 15.2. The picker itself works
+            // on our macOS 14 deployment target, so older systems simply use a
+            // generic label while still capturing the exact filter the user chose.
+            if #available(macOS 15.2, *), let window = filter.includedWindows.first {
                 let appName = window.owningApplication?.applicationName ?? "Window"
                 let title = (window.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let name = title.isEmpty ? appName : "\(appName) — \(title)"
@@ -427,10 +430,18 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
                     height: height
                 )
             }
-            return SystemCaptureSelection(styleName: "Window", displayName: "Selected Window", detail: "macOS sharing picker", width: width, height: height)
+            return SystemCaptureSelection(
+                styleName: "Window",
+                displayName: "Selected Window",
+                detail: "Selected with the macOS sharing picker",
+                width: width,
+                height: height
+            )
 
         case .application:
-            if let app = filter.includedApplications.first {
+            // `includedApplications` is also macOS 15.2+. Keep the app deployable
+            // to macOS 14 by falling back to a generic description there.
+            if #available(macOS 15.2, *), let app = filter.includedApplications.first {
                 return SystemCaptureSelection(
                     styleName: "Application",
                     displayName: app.applicationName,
@@ -439,7 +450,13 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
                     height: height
                 )
             }
-            return SystemCaptureSelection(styleName: "Application", displayName: "Selected Application", detail: "macOS sharing picker", width: width, height: height)
+            return SystemCaptureSelection(
+                styleName: "Application",
+                displayName: "Selected Application",
+                detail: "Selected with the macOS sharing picker",
+                width: width,
+                height: height
+            )
 
         case .display:
             return SystemCaptureSelection(
