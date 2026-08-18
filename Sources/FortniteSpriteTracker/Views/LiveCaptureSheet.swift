@@ -27,27 +27,17 @@ struct LiveCaptureSheet: View {
                 liveCapture.targetProfileID = store.selectedProfileID
             }
             await liveCapture.refreshSources()
-            if liveCapture.sourceMode != .captureDevice {
+            if liveCapture.sourceMode == .systemPicker, liveCapture.systemSelection != nil {
                 await liveCapture.refreshPreview()
             }
         }
-        .onChange(of: liveCapture.sourceMode) { _, _ in
+        .onChange(of: liveCapture.sourceMode) { _, mode in
             Task {
                 await liveCapture.refreshSources()
-                if liveCapture.sourceMode != .captureDevice {
+                if mode == .systemPicker, liveCapture.systemSelection != nil {
                     await liveCapture.refreshPreview()
                 }
             }
-        }
-        .onChange(of: liveCapture.selectedApplicationID) { _, _ in
-            Task {
-                await liveCapture.resolveApplicationTarget()
-                await liveCapture.refreshPreview()
-            }
-        }
-        .onChange(of: liveCapture.selectedWindowID) { _, _ in
-            guard liveCapture.sourceMode == .window else { return }
-            Task { await liveCapture.refreshPreview() }
         }
     }
 
@@ -70,7 +60,7 @@ struct LiveCaptureSheet: View {
 
             permissionRow(
                 title: "Screen Recording",
-                detail: "Required for Application and Specific Window capture.",
+                detail: "Required for Screen / Window capture.",
                 granted: liveCapture.screenRecordingGranted,
                 buttonTitle: "Request Access"
             ) { liveCapture.requestScreenRecordingPermission() }
@@ -110,30 +100,33 @@ struct LiveCaptureSheet: View {
     private var sourceCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Capture Source").font(.headline)
-                Spacer()
-                Button {
-                    Task { await liveCapture.refreshSources() }
-                } label: {
-                    Label(liveCapture.isRefreshing ? "Refreshing…" : "Refresh Sources", systemImage: "arrow.clockwise")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Capture Source").font(.headline)
+                    Text("Pick the exact Fortnite screen/window visually, or read a USB capture device directly.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .disabled(liveCapture.isRefreshing || liveCapture.isStreaming)
+                Spacer()
+                if liveCapture.sourceMode == .captureDevice {
+                    Button {
+                        Task { await liveCapture.refreshSources() }
+                    } label: {
+                        Label(liveCapture.isRefreshing ? "Refreshing…" : "Refresh Devices", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(liveCapture.isRefreshing || liveCapture.isStreaming)
+                }
             }
 
-            Picker("Source type", selection: $liveCapture.sourceMode) {
-                ForEach(CaptureSourceMode.allCases) { mode in
-                    Label(mode.title, systemImage: mode.symbol).tag(mode)
-                }
+            Picker("Source", selection: $liveCapture.sourceMode) {
+                Label("Screen / Window", systemImage: "rectangle.on.rectangle").tag(CaptureSourceMode.systemPicker)
+                Label("Capture Device", systemImage: "video.fill").tag(CaptureSourceMode.captureDevice)
             }
             .pickerStyle(.segmented)
             .disabled(liveCapture.isStreaming)
 
-            switch liveCapture.sourceMode {
-            case .application:
-                applicationPicker
-            case .window:
-                windowPicker
-            case .captureDevice:
+            if liveCapture.sourceMode == .systemPicker {
+                systemPickerSource
+            } else {
                 devicePicker
             }
 
@@ -153,6 +146,70 @@ struct LiveCaptureSheet: View {
         .padding(16)
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.08)))
+    }
+
+    private var systemPickerSource: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                liveCapture.chooseSystemCaptureSource()
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "rectangle.on.rectangle.angled")
+                        .font(.title3.weight(.bold))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(liveCapture.systemSelection == nil ? "Choose Screen or Window…" : "Change Screen or Window…")
+                            .font(.headline)
+                        Text("macOS shows visual thumbnails for screens and windows — including full-screen Spaces.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(liveCapture.isStreaming)
+
+            if let selection = liveCapture.systemSelection {
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(.green.opacity(0.14))
+                            .frame(width: 42, height: 42)
+                        Image(systemName: selection.styleName == "Screen" ? "display" : "macwindow")
+                            .foregroundStyle(.green)
+                            .font(.system(size: 18, weight: .bold))
+                    }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(selection.displayName)
+                            .font(.subheadline.weight(.bold))
+                            .lineLimit(1)
+                        Text("\(selection.styleName) · \(selection.sizeText) · \(selection.detail)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer()
+                    Label("Selected", systemImage: "checkmark.circle.fill")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.green)
+                }
+                .padding(12)
+                .background(.green.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.green.opacity(0.22)))
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle")
+                    Text("This replaces the old Application + Specific Window dropdowns. Pick the source by thumbnail, like a screen-sharing app.")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var applicationPicker: some View {
@@ -229,7 +286,7 @@ struct LiveCaptureSheet: View {
             HStack {
                 Text("What Sprite Vault Sees").font(.headline)
                 Spacer()
-                if liveCapture.sourceMode != .captureDevice && !liveCapture.isStreaming {
+                if liveCapture.sourceMode == .systemPicker && liveCapture.systemSelection != nil && !liveCapture.isStreaming {
                     Button {
                         Task { await liveCapture.refreshPreview() }
                     } label: {
@@ -275,7 +332,7 @@ struct LiveCaptureSheet: View {
                             .font(.system(size: 28, weight: .bold))
                         Text(liveCapture.sourceMode == .captureDevice
                              ? "Start a scan to see the live capture-device preview."
-                             : "Refresh the preview to verify the exact selected window.")
+                             : "Choose a screen/window above, then Sprite Vault shows exactly what it will read.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

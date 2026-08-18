@@ -5,11 +5,12 @@ import CoreImage
 import CoreMedia
 import CoreVideo
 
-final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SCContentSharingPickerObserver, @unchecked Sendable {
     typealias AnalysisHandler = @Sendable (SpriteFrameAnalysis) -> Void
     typealias StatusHandler = @Sendable (String) -> Void
     typealias PreviewHandler = @Sendable (CGImage) -> Void
     typealias ErrorHandler = @Sendable (Error) -> Void
+    typealias PickerSelectionHandler = @Sendable (SystemCaptureSelection?) -> Void
 
     private let sampleQueue = DispatchQueue(label: "FortniteSpriteTracker.ScreenCapture", qos: .userInitiated)
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
@@ -28,6 +29,76 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
     private var onStatus: StatusHandler?
     private var onPreview: PreviewHandler?
     private var onError: ErrorHandler?
+
+    private var selectedSystemFilter: SCContentFilter?
+    private var selectedSystemSelection: SystemCaptureSelection?
+    private var pickerSelectionHandler: PickerSelectionHandler?
+    private var pickerObserverInstalled = false
+
+    var hasSystemSelection: Bool { selectedSystemFilter != nil }
+    var systemSelection: SystemCaptureSelection? { selectedSystemSelection }
+
+    /// Presents Apple's native ScreenCaptureKit sharing picker. This is the
+    /// same system-level content picker ScreenCaptureKit recommends instead of
+    /// maintaining our own fragile list of windows. It can see displays and
+    /// windows across Spaces, including full-screen OBS projector surfaces.
+    func presentSystemPicker(onSelection: @escaping PickerSelectionHandler) {
+        pickerSelectionHandler = onSelection
+
+        let picker = SCContentSharingPicker.shared
+        if !pickerObserverInstalled {
+            picker.add(self)
+            pickerObserverInstalled = true
+        }
+
+        var configuration = SCContentSharingPickerConfiguration()
+        let modesRawValue = SCContentSharingPickerMode.singleWindow.rawValue
+            | SCContentSharingPickerMode.singleDisplay.rawValue
+        configuration.allowedPickerModes = SCContentSharingPickerMode(rawValue: modesRawValue)
+        configuration.allowsChangingSelectedContent = true
+        if let bundleID = Bundle.main.bundleIdentifier {
+            configuration.excludedBundleIDs = [bundleID]
+        }
+        picker.defaultConfiguration = configuration
+        picker.isActive = true
+        picker.present()
+    }
+
+    func clearSystemSelection() {
+        selectedSystemFilter = nil
+        selectedSystemSelection = nil
+    }
+
+    func captureSystemSelectionOnce() async throws -> CGImage {
+        guard let filter = selectedSystemFilter else {
+            throw ScreenCaptureServiceError.noSystemSelection
+        }
+        let configuration = configuration(for: filter, fps: 3)
+        return try await SCScreenshotManager.captureImage(
+            contentFilter: filter,
+            configuration: configuration
+        )
+    }
+
+    func startSystemSelection(
+        fps: Int,
+        onAnalysis: @escaping AnalysisHandler,
+        onStatus: @escaping StatusHandler,
+        onPreview: @escaping PreviewHandler,
+        onError: @escaping ErrorHandler
+    ) async throws {
+        guard let filter = selectedSystemFilter else {
+            throw ScreenCaptureServiceError.noSystemSelection
+        }
+        try await start(
+            filter: filter,
+            fps: fps,
+            onAnalysis: onAnalysis,
+            onStatus: onStatus,
+            onPreview: onPreview,
+            onError: onError
+        )
+    }
 
     func availableContent() async throws -> (applications: [CaptureApplicationInfo], windows: [CaptureWindowInfo]) {
         let content = try await SCShareableContent.excludingDesktopWindows(
@@ -121,7 +192,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
     func captureOnce(windowID: CGWindowID) async throws -> CGImage {
         let window = try await shareableWindow(withID: windowID)
         let filter = SCContentFilter(desktopIndependentWindow: window)
-        let configuration = configuration(for: window, filter: filter, fps: 3)
+        let configuration = configuration(for: filter, fps: 3)
         return try await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
@@ -136,12 +207,30 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
         onPreview: @escaping PreviewHandler,
         onError: @escaping ErrorHandler
     ) async throws {
-        if stream != nil { await stop() }
-
         let window = try await shareableWindow(withID: windowID)
         let filter = SCContentFilter(desktopIndependentWindow: window)
+        try await start(
+            filter: filter,
+            fps: fps,
+            onAnalysis: onAnalysis,
+            onStatus: onStatus,
+            onPreview: onPreview,
+            onError: onError
+        )
+    }
+
+    private func start(
+        filter: SCContentFilter,
+        fps: Int,
+        onAnalysis: @escaping AnalysisHandler,
+        onStatus: @escaping StatusHandler,
+        onPreview: @escaping PreviewHandler,
+        onError: @escaping ErrorHandler
+    ) async throws {
+        if stream != nil { await stop() }
+
         let clampedFPS = min(max(fps, 2), 5)
-        let configuration = configuration(for: window, filter: filter, fps: clampedFPS)
+        let configuration = configuration(for: filter, fps: clampedFPS)
 
         self.onAnalysis = onAnalysis
         self.onStatus = onStatus
@@ -173,6 +262,35 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         onError?(error)
+    }
+
+    func contentSharingPicker(
+        _ picker: SCContentSharingPicker,
+        didUpdateWith filter: SCContentFilter,
+        for stream: SCStream?
+    ) {
+        selectedSystemFilter = filter
+        let selection = Self.describeSystemSelection(filter)
+        selectedSystemSelection = selection
+        let handler = pickerSelectionHandler
+        pickerSelectionHandler = nil
+        picker.isActive = false
+        handler?(selection)
+    }
+
+    func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
+        let handler = pickerSelectionHandler
+        pickerSelectionHandler = nil
+        picker.isActive = false
+        handler?(nil)
+    }
+
+    func contentSharingPickerStartDidFailWithError(_ error: Error) {
+        let handler = pickerSelectionHandler
+        pickerSelectionHandler = nil
+        SCContentSharingPicker.shared.isActive = false
+        onError?(error)
+        handler?(nil)
     }
 
     func stream(
@@ -267,8 +385,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
     }
 
     private func configuration(
-        for window: SCWindow,
-        filter: SCContentFilter,
+        for filter: SCContentFilter,
         fps: Int
     ) -> SCStreamConfiguration {
         let configuration = SCStreamConfiguration()
@@ -277,9 +394,12 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
         configuration.queueDepth = 2
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(fps, 1)))
 
+        // Using the filter's contentRect instead of an SCWindow frame is
+        // critical here: filters returned by Apple's picker can represent a
+        // full display, a full-screen window in another Space, or an app.
         let pixelScale = max(CGFloat(filter.pointPixelScale), 1)
-        let nativeWidth = max(window.frame.width * pixelScale, 1)
-        let nativeHeight = max(window.frame.height * pixelScale, 1)
+        let nativeWidth = max(filter.contentRect.width * pixelScale, 1)
+        let nativeHeight = max(filter.contentRect.height * pixelScale, 1)
         let outputWidth = min(nativeWidth, 1440)
         let scale = outputWidth / nativeWidth
         configuration.width = max(Int(outputWidth.rounded()), 2)
@@ -287,6 +407,55 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
         configuration.scalesToFit = true
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         return configuration
+    }
+
+    private static func describeSystemSelection(_ filter: SCContentFilter) -> SystemCaptureSelection {
+        let width = max(Int((filter.contentRect.width * CGFloat(max(filter.pointPixelScale, 1))).rounded()), 1)
+        let height = max(Int((filter.contentRect.height * CGFloat(max(filter.pointPixelScale, 1))).rounded()), 1)
+
+        switch filter.style {
+        case .window:
+            if let window = filter.includedWindows.first {
+                let appName = window.owningApplication?.applicationName ?? "Window"
+                let title = (window.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let name = title.isEmpty ? appName : "\(appName) — \(title)"
+                return SystemCaptureSelection(
+                    styleName: "Window",
+                    displayName: name,
+                    detail: "Selected with the macOS sharing picker",
+                    width: width,
+                    height: height
+                )
+            }
+            return SystemCaptureSelection(styleName: "Window", displayName: "Selected Window", detail: "macOS sharing picker", width: width, height: height)
+
+        case .application:
+            if let app = filter.includedApplications.first {
+                return SystemCaptureSelection(
+                    styleName: "Application",
+                    displayName: app.applicationName,
+                    detail: "All selected \(app.applicationName) windows",
+                    width: width,
+                    height: height
+                )
+            }
+            return SystemCaptureSelection(styleName: "Application", displayName: "Selected Application", detail: "macOS sharing picker", width: width, height: height)
+
+        case .display:
+            return SystemCaptureSelection(
+                styleName: "Screen",
+                displayName: "Selected Screen",
+                detail: "Full display capture",
+                width: width,
+                height: height
+            )
+
+        case .none:
+            return SystemCaptureSelection(styleName: "Source", displayName: "Selected Source", detail: "macOS sharing picker", width: width, height: height)
+
+        @unknown default:
+            return SystemCaptureSelection(styleName: "Source", displayName: "Selected Source", detail: "macOS sharing picker", width: width, height: height)
+        }
     }
 
     /// Samples only the collection grid and right detail panel. The animated 3D
@@ -382,11 +551,14 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
 
 private enum ScreenCaptureServiceError: LocalizedError {
     case windowUnavailable
+    case noSystemSelection
 
     var errorDescription: String? {
         switch self {
         case .windowUnavailable:
-            return "The selected capture window is no longer available. Refresh the capture source and try again."
+            return "The selected capture window is no longer available. Choose it again and try once more."
+        case .noSystemSelection:
+            return "Choose a screen or window with the macOS sharing picker first."
         }
     }
 }

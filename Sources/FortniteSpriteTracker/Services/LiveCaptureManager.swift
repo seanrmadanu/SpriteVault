@@ -62,6 +62,7 @@ final class LiveCaptureManager: ObservableObject {
     }
     @Published var framesPerSecond = 3
 
+    @Published private(set) var systemSelection: SystemCaptureSelection?
     @Published private(set) var resolvedApplicationTarget: ResolvedCaptureTarget?
     @Published private(set) var previewImage: NSImage?
     @Published private(set) var previewSourceLabel: String?
@@ -120,7 +121,8 @@ final class LiveCaptureManager: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
-        sourceMode = CaptureSourceMode(rawValue: defaults.string(forKey: DefaultsKey.mode) ?? "") ?? .application
+        let restoredMode = CaptureSourceMode(rawValue: defaults.string(forKey: DefaultsKey.mode) ?? "")
+        sourceMode = restoredMode == .captureDevice ? .captureDevice : .systemPicker
         selectedApplicationID = defaults.string(forKey: DefaultsKey.application)
         let savedWindow = defaults.object(forKey: DefaultsKey.window) as? NSNumber
         selectedWindowID = savedWindow.map { CGWindowID($0.uint32Value) }
@@ -157,7 +159,7 @@ final class LiveCaptureManager: ObservableObject {
     func requestScreenRecordingPermission() {
         screenRecordingGranted = CGRequestScreenCaptureAccess()
         statusText = screenRecordingGranted
-            ? "Screen Recording access granted. Refresh capture sources."
+            ? "Screen Recording access granted. You can choose a screen or window now."
             : "Allow Screen Recording for Sprite Vault in System Settings. macOS may require a relaunch."
     }
 
@@ -183,6 +185,29 @@ final class LiveCaptureManager: ObservableObject {
         }
     }
 
+    func chooseSystemCaptureSource() {
+        guard !isStreaming else { return }
+        sourceMode = .systemPicker
+        errorText = nil
+        statusText = "Choose the exact Fortnite screen or window in the macOS picker…"
+
+        captureService.presentSystemPicker { [weak self] selection in
+            Task { @MainActor in
+                guard let self else { return }
+                guard let selection else {
+                    if self.systemSelection == nil {
+                        self.statusText = "No screen/window selected yet."
+                    }
+                    return
+                }
+
+                self.systemSelection = selection
+                self.statusText = "Selected \(selection.displayName) · \(selection.sizeText). Verifying preview…"
+                await self.refreshPreview()
+            }
+        }
+    }
+
     func refreshSources() async {
         guard !isRefreshing else { return }
         isRefreshing = true
@@ -194,6 +219,17 @@ final class LiveCaptureManager: ObservableObject {
         captureDevices = captureDeviceService.availableDevices()
         if selectedCaptureDeviceID == nil || !captureDevices.contains(where: { $0.id == selectedCaptureDeviceID }) {
             selectedCaptureDeviceID = captureDevices.first?.id
+        }
+
+        if sourceMode == .systemPicker {
+            systemSelection = captureService.systemSelection
+            statusText = sourceReadyDescription
+            return
+        }
+
+        if sourceMode == .captureDevice {
+            statusText = sourceReadyDescription
+            return
         }
 
         do {
@@ -275,6 +311,18 @@ final class LiveCaptureManager: ObservableObject {
             let sourceLabel: String
 
             switch sourceMode {
+            case .systemPicker:
+                guard let selection = systemSelection, captureService.hasSystemSelection else {
+                    throw LiveCaptureError.sourceUnavailable
+                }
+                sourceKey = "system:\(selection.styleName):\(selection.displayName):\(selection.width)x\(selection.height)"
+                sourceLabel = "\(selection.styleName): \(selection.displayName)"
+                image = try await captureService.captureSystemSelectionOnce()
+
+                guard previewRequestID == requestID,
+                      sourceMode == .systemPicker,
+                      systemSelection == selection else { return }
+
             case .application:
                 guard let applicationID = selectedApplicationID else {
                     throw LiveCaptureError.sourceUnavailable
@@ -332,7 +380,7 @@ final class LiveCaptureManager: ObservableObject {
     func captureOnce() async {
         guard !isCapturingOnce, !isStreaming else { return }
         guard sourceMode != .captureDevice else {
-            errorText = "Capture Once is available for Application and Specific Window sources. Use Start Scan for a capture device."
+            errorText = "Capture Once is available for screen/window sources. Use Start Scan for a capture device."
             return
         }
 
@@ -343,12 +391,17 @@ final class LiveCaptureManager: ObservableObject {
 
         do {
             let image: CGImage
-            if sourceMode == .application {
+            switch sourceMode {
+            case .systemPicker:
+                image = try await captureService.captureSystemSelectionOnce()
+            case .application:
                 guard let target = try await resolveWindowForCurrentSource() else { throw LiveCaptureError.sourceUnavailable }
                 image = try await captureService.captureOnce(windowID: target.windowID)
-            } else {
+            case .window:
                 guard let selectedWindowID else { throw LiveCaptureError.sourceUnavailable }
                 image = try await captureService.captureOnce(windowID: selectedWindowID)
+            case .captureDevice:
+                throw LiveCaptureError.sourceUnavailable
             }
             previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
             let analysis = try await ScreenshotSpriteAnalyzer.shared.analyzeFrame(
@@ -379,7 +432,7 @@ final class LiveCaptureManager: ObservableObject {
         }
         guard !isStreaming, !isCapturingOnce else { return }
 
-        if applications.isEmpty && windows.isEmpty && captureDevices.isEmpty {
+        if sourceMode == .captureDevice && captureDevices.isEmpty {
             await refreshSources()
         }
         guard await ensureSourceReady() else { return }
@@ -432,6 +485,27 @@ final class LiveCaptureManager: ObservableObject {
         errorText = nil
         do {
             switch sourceMode {
+            case .systemPicker:
+                try await captureService.startSystemSelection(
+                    fps: framesPerSecond,
+                    onAnalysis: { [weak self] analysis in
+                        Task { @MainActor in self?.receive(analysis) }
+                    },
+                    onStatus: { [weak self] status in
+                        Task { @MainActor in self?.receiveCaptureStatus(status) }
+                    },
+                    onPreview: { [weak self] image in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            self.previewImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                            self.previewSourceLabel = self.selectedSourceDisplayName
+                        }
+                    },
+                    onError: { [weak self] error in
+                        Task { @MainActor in self?.handleStreamError(error) }
+                    }
+                )
+
             case .application, .window:
                 let windowID: CGWindowID
                 if sourceMode == .application {
@@ -600,6 +674,8 @@ final class LiveCaptureManager: ObservableObject {
 
     var selectedSourceDisplayName: String {
         switch sourceMode {
+        case .systemPicker:
+            return systemSelection?.displayName ?? "No screen/window selected"
         case .application:
             return selectedApplication?.displayName ?? "No application selected"
         case .window:
@@ -645,6 +721,11 @@ final class LiveCaptureManager: ObservableObject {
 
     private var sourceReadyDescription: String {
         switch sourceMode {
+        case .systemPicker:
+            if let selection = systemSelection {
+                return "Ready: \(selection.styleName) — \(selection.displayName) · \(selection.sizeText)."
+            }
+            return "Choose the Fortnite screen/window with the macOS sharing picker."
         case .application:
             if let app = selectedApplication {
                 if let target = resolvedApplicationTarget {
@@ -662,6 +743,15 @@ final class LiveCaptureManager: ObservableObject {
 
     private func ensureSourceReady() async -> Bool {
         switch sourceMode {
+        case .systemPicker:
+            guard systemSelection != nil, captureService.hasSystemSelection else {
+                await failToStart("Choose the Fortnite screen or window in Live Capture first.")
+                return false
+            }
+            guard screenRecordingGranted || CGPreflightScreenCaptureAccess() else {
+                await failToStart("Screen Recording permission is required for screen/window capture.")
+                return false
+            }
         case .application:
             guard selectedApplicationID != nil else {
                 await failToStart("Choose an application in Live Capture first.")
@@ -712,6 +802,9 @@ final class LiveCaptureManager: ObservableObject {
 
     private var currentPreviewSourceKey: String? {
         switch sourceMode {
+        case .systemPicker:
+            guard let selection = systemSelection else { return nil }
+            return "system:\(selection.styleName):\(selection.displayName):\(selection.width)x\(selection.height)"
         case .application:
             guard let applicationID = selectedApplicationID,
                   let target = resolvedApplicationTarget else { return nil }
@@ -859,7 +952,7 @@ final class LiveCaptureManager: ObservableObject {
 
     private func stopCaptureEngine() async {
         switch sourceMode {
-        case .application, .window:
+        case .systemPicker, .application, .window:
             await captureService.stop()
         case .captureDevice:
             await captureDeviceService.stop()

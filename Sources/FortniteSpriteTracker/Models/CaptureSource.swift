@@ -2,6 +2,7 @@ import Foundation
 import CoreGraphics
 
 enum CaptureSourceMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case systemPicker
     case application
     case window
     case captureDevice
@@ -10,6 +11,7 @@ enum CaptureSourceMode: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
+        case .systemPicker: return "Screen / Window"
         case .application: return "Application"
         case .window: return "Specific Window"
         case .captureDevice: return "Capture Device"
@@ -18,6 +20,7 @@ enum CaptureSourceMode: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var symbol: String {
         switch self {
+        case .systemPicker: return "rectangle.on.rectangle"
         case .application: return "app.fill"
         case .window: return "macwindow"
         case .captureDevice: return "video.fill"
@@ -57,4 +60,15 @@ struct ResolvedCaptureTarget: Sendable {
     let windowTitle: String
     let width: Int
     let height: Int
+}
+
+
+struct SystemCaptureSelection: Hashable, Sendable {
+    let styleName: String
+    let displayName: String
+    let detail: String
+    let width: Int
+    let height: Int
+
+    var sizeText: String { "\(width)×\(height)" }
 }
