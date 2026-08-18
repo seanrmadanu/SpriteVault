@@ -83,6 +83,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         selector.begin()
     }
 
+    @MainActor
     func restoreSavedRegionSelection() async -> SystemCaptureSelection? {
         guard selectedSystemFilter == nil,
               let saved = SavedCaptureRegion.load() else {
@@ -769,9 +770,15 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
 
     private static func resolveOverlayRect(forWindowID windowID: CGWindowID, fallback: CGRect) -> CGRect? {
         if let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
-           let dictionary = info.first?[kCGWindowBounds as String] as? CFDictionary,
-           let quartzRect = CGRect(dictionaryRepresentation: dictionary) {
-            return appKitRect(fromQuartzRect: quartzRect)
+           let boundsValue = info.first?[kCGWindowBounds as String] {
+            // CGWindowListCopyWindowInfo documents kCGWindowBounds as a
+            // CGRect dictionary. Avoid `as? CFDictionary`: Swift 6 diagnoses
+            // conditional casts to CoreFoundation collection types because
+            // bridging makes that conditional cast meaningless.
+            let boundsDictionary = boundsValue as! CFDictionary
+            if let quartzRect = CGRect(dictionaryRepresentation: boundsDictionary) {
+                return appKitRect(fromQuartzRect: quartzRect)
+            }
         }
         return appKitRect(fromQuartzRect: fallback)
     }
@@ -966,7 +973,10 @@ private enum SpriteOverlayCardState: Equatable {
     case lost(name: String, level: Int?, mastered: Bool)
 }
 
-private final class SpriteScanOverlayController {
+// AppKit overlay state is only touched on the main thread. The capture service
+// itself is @unchecked Sendable because ScreenCaptureKit invokes callbacks on
+// its sample queue, so explicitly acknowledge that synchronization here too.
+private final class SpriteScanOverlayController: @unchecked Sendable {
     var onDeepScan: ((Int) -> Void)?
 
     private var panel: NSPanel?

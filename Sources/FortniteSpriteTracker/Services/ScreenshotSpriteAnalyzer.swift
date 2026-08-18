@@ -693,7 +693,7 @@ actor ScreenshotSpriteAnalyzer {
         } / Float(cards.count)
 
         let maximumStart = references.count - 1 - highestSlot
-        guard maximumStart >= 0 else { return independent }
+        guard maximumStart >= 0 else { return confidentIndependent }
 
         var sequenceScores: [(start: Int, mean: Float)] = []
         sequenceScores.reserveCapacity(maximumStart + 1)
@@ -715,7 +715,7 @@ actor ScreenshotSpriteAnalyzer {
         }
 
         let ranked = sequenceScores.sorted { $0.mean < $1.mean }
-        guard let best = ranked.first else { return independent }
+        guard let best = ranked.first else { return confidentIndependent }
         let second = ranked.dropFirst().first?.mean ?? .greatestFiniteMagnitude
 
         let nearIndependent = best.mean <= independentMean * 1.45 + 0.35
