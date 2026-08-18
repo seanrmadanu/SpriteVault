@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct SpriteCard: View {
+struct SpriteCard: View, Equatable {
     let item: SpriteItem
     var highlighted: Bool = false
     let onOwned: () -> Void
@@ -10,12 +10,19 @@ struct SpriteCard: View {
     @State private var hovered = false
     @State private var burst = false
 
-    private let cardHeight: CGFloat = 268
+    private let cardHeight: CGFloat = 292
+
+    static func == (lhs: SpriteCard, rhs: SpriteCard) -> Bool {
+        lhs.item == rhs.item && lhs.highlighted == rhs.highlighted
+    }
 
     var body: some View {
         card
             .frame(height: cardHeight)
-            .zIndex(highlighted ? 100 : 0)
+            .scaleEffect(hovered ? 1.018 : 1)
+            .offset(y: hovered ? -2 : 0)
+            .animation(.spring(response: 0.24, dampingFraction: 0.82), value: hovered)
+            .zIndex(highlighted || hovered ? 100 : 0)
             .shadow(
                 color: .black.opacity(0.16),
                 radius: 6,
@@ -71,13 +78,17 @@ struct SpriteCard: View {
             CachedSpriteImage(assetName: item.imageAssetName, accessibilityLabel: item.name)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(8)
-                .saturation(item.isLost ? 0.05 : item.isLocked ? 0.25 : 1)
-                .opacity(item.isLost ? 0.58 : item.isLocked ? 0.42 : 1)
+                .saturation(item.isLost ? 0.04 : item.isLocked ? 0.72 : 1)
+                .opacity(item.isLost ? 0.58 : item.isLocked ? 0.80 : 1)
 
             if item.isLocked {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 28, weight: .black))
-                    .foregroundStyle(.white.opacity(0.74))
+                Label("LOCKED", systemImage: "lock.fill")
+                    .font(.system(size: 10, weight: .black, design: .rounded))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(.black.opacity(0.70), in: Capsule())
+                    .overlay(Capsule().stroke(.white.opacity(0.16)))
+                    .foregroundStyle(.white)
             }
         }
         .frame(height: 146)
@@ -116,13 +127,16 @@ struct SpriteCard: View {
     private var controls: some View {
         HStack(spacing: 7) {
             Button(action: onOwned) {
-                Label(ownedButtonTitle, systemImage: item.owned ? "checkmark" : "plus")
+                Label(ownedButtonTitle, systemImage: ownedButtonSymbol)
                     .frame(maxWidth: .infinity)
                     .lineLimit(nil)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .buttonStyle(.borderedProminent)
-            .tint(item.owned ? .green.opacity(0.82) : .white.opacity(0.12))
+            .tint(
+                item.isLost ? .orange.opacity(0.82) :
+                item.owned ? .green.opacity(0.82) : .white.opacity(0.12)
+            )
 
             Menu {
                 Section("Level") {
@@ -180,7 +194,7 @@ struct SpriteCard: View {
     }
 
     private var lostBadge: some View {
-        Text("LOST")
+        Text("SUMMON")
             .font(.system(size: 8, weight: .black, design: .rounded))
             .padding(.horizontal, 7)
             .padding(.vertical, 4)
@@ -190,9 +204,17 @@ struct SpriteCard: View {
 
     private var ownedButtonTitle: String {
         switch item.status {
-        case .locked: return "Not owned"
+        case .locked: return "Locked"
         case .collected: return "Owned"
-        case .lost: return "Lost"
+        case .lost: return "Needs summon"
+        }
+    }
+
+    private var ownedButtonSymbol: String {
+        switch item.status {
+        case .locked: return "lock.fill"
+        case .collected: return "checkmark"
+        case .lost: return "arrow.clockwise"
         }
     }
 

@@ -15,6 +15,9 @@ struct ContentView: View {
     @State private var statusMessage: AppStatusMessage?
     @State private var showActivityCenter = false
     @State private var highlightedSpriteName: String?
+    @State private var chromeVisible = true
+    @State private var lastScrollOffset: CGFloat = 0
+    @State private var hasScrollSample = false
 
     private let columns = [GridItem(.adaptive(minimum: 190, maximum: 260), spacing: 14)]
 
@@ -25,11 +28,31 @@ struct ContentView: View {
             AnimatedBackground()
 
             VStack(spacing: 0) {
-                header
-                filters
+                if chromeVisible {
+                    VStack(spacing: 0) {
+                        header
+                        filters
+                    }
+                    .background(.ultraThinMaterial)
+                    .overlay(alignment: .bottom) {
+                        Rectangle()
+                            .fill(.white.opacity(0.07))
+                            .frame(height: 1)
+                    }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(10)
+                }
 
                 ScrollViewReader { proxy in
                     ScrollView {
+                        GeometryReader { geometry in
+                            Color.clear.preference(
+                                key: CollectionScrollOffsetKey.self,
+                                value: geometry.frame(in: .named("collectionScroll")).minY
+                            )
+                        }
+                        .frame(height: 0)
+
                         LazyVGrid(columns: columns, spacing: 14) {
                             ForEach(filteredSprites) { item in
                                 SpriteCard(
@@ -39,6 +62,7 @@ struct ContentView: View {
                                     onMastered: { store.toggleMastered(item) },
                                     onLevel: { level in store.setLevel(level, for: item) }
                                 )
+                                .equatable()
                                 .id(item.name)
                             }
                         }
@@ -46,7 +70,10 @@ struct ContentView: View {
                         .padding(.top, 20)
                         .padding(.bottom, 80)
                     }
-                    .scrollClipDisabled()
+                    .coordinateSpace(name: "collectionScroll")
+                    .onPreferenceChange(CollectionScrollOffsetKey.self) { offset in
+                        updateChromeVisibility(for: offset)
+                    }
                     .onChange(of: store.focusRequest) { _, request in
                         guard let request else { return }
                         highlightedSpriteName = request.name
@@ -129,26 +156,6 @@ struct ContentView: View {
                 liveCapture.targetProfileID = id
             }
         }
-        .onChange(of: liveCapture.resultRevision) { _, _ in
-            guard !liveCapture.latestDetections.isEmpty else { return }
-            let targetID = liveCapture.targetProfileID ?? store.selectedProfileID
-            guard let profile = store.profile(withID: targetID) else { return }
-
-            let summary = store.applyDetections(
-                liveCapture.latestDetections,
-                to: targetID,
-                replacingExisting: false
-            )
-            liveCapture.reportAppliedChanges(summary, profileName: profile.name)
-
-            if !liveCapture.isStreaming {
-                showStatus(
-                    "Captured \(liveCapture.latestDetections.count) Sprite card\(liveCapture.latestDetections.count == 1 ? "" : "s") into \(profile.name)",
-                    symbol: "camera.viewfinder",
-                    isError: false
-                )
-            }
-        }
         .onChange(of: store.recentEvent) { _, event in
             guard event != nil else { return }
             withAnimation(.spring(response: 0.4, dampingFraction: 0.72)) { toastVisible = true }
@@ -182,6 +189,28 @@ struct ContentView: View {
         }
     }
 
+    private func updateChromeVisibility(for offset: CGFloat) {
+        guard hasScrollSample else {
+            hasScrollSample = true
+            lastScrollOffset = offset
+            return
+        }
+
+        let delta = offset - lastScrollOffset
+        lastScrollOffset = offset
+
+        if offset >= -8 {
+            guard !chromeVisible else { return }
+            withAnimation(.easeOut(duration: 0.20)) { chromeVisible = true }
+        } else if delta < -6, offset < -42 {
+            guard chromeVisible else { return }
+            withAnimation(.easeOut(duration: 0.18)) { chromeVisible = false }
+        } else if delta > 6 {
+            guard !chromeVisible else { return }
+            withAnimation(.easeOut(duration: 0.20)) { chromeVisible = true }
+        }
+    }
+
     private var header: some View {
         VStack(spacing: 12) {
             HStack(alignment: .center, spacing: 18) {
@@ -198,7 +227,7 @@ struct ContentView: View {
                     ProgressPill(title: "Owned", value: store.ownedCount, total: store.sprites.count, symbol: "checkmark")
                     ProgressPill(title: "Mastered", value: store.masteredCount, total: store.sprites.count, symbol: "crown.fill")
                     if store.lostCount > 0 {
-                        ProgressPill(title: "Lost", value: store.lostCount, total: store.sprites.count, symbol: "clock.arrow.circlepath")
+                        ProgressPill(title: "Summon", value: store.lostCount, total: store.sprites.count, symbol: "clock.arrow.circlepath")
                     }
                 }
             }
@@ -495,4 +524,12 @@ private struct AppStatusMessage: Identifiable {
     let text: String
     let symbol: String
     let isError: Bool
+}
+
+private struct CollectionScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
 }

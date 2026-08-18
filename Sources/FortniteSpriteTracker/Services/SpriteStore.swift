@@ -128,7 +128,11 @@ final class SpriteStore: ObservableObject {
         var event: SpriteEvent?
         mutateSelectedProfile { profile in
             guard let index = profile.sprites.firstIndex(where: { $0.id == item.id }) else { return }
-            if profile.sprites[index].owned {
+            if profile.sprites[index].isLost {
+                // The card action for a lost Sprite means "I summoned it", not
+                // "remove it from my collection".
+                profile.sprites[index].status = .collected
+            } else if profile.sprites[index].owned {
                 profile.sprites[index].status = .locked
                 profile.sprites[index].level = nil
                 profile.sprites[index].mastered = false

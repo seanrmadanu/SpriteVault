@@ -60,7 +60,7 @@ final class LiveCaptureManager: ObservableObject {
     @Published var targetProfileID: UUID? {
         didSet { lastDetectionSignature = "" }
     }
-    @Published var framesPerSecond = 12
+    @Published var framesPerSecond = 20
 
     @Published private(set) var systemSelection: SystemCaptureSelection?
     @Published private(set) var resolvedApplicationTarget: ResolvedCaptureTarget?
@@ -68,6 +68,7 @@ final class LiveCaptureManager: ObservableObject {
     @Published private(set) var previewSourceLabel: String?
     @Published private(set) var isPreviewRefreshing = false
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isSelectingWindow = false
     @Published private(set) var isStreaming = false
     @Published private(set) var isHotkeyScanning = false
     @Published private(set) var isCapturingOnce = false
@@ -111,6 +112,7 @@ final class LiveCaptureManager: ObservableObject {
     private var masteredNames = Set<String>()
     private var lostNames = Set<String>()
     private var previewRequestID = UUID()
+    private var windowSelectionRequestID: UUID?
 
     private enum DefaultsKey {
         static let mode = "capture.source.mode"
@@ -121,8 +123,7 @@ final class LiveCaptureManager: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
-        let restoredMode = CaptureSourceMode(rawValue: defaults.string(forKey: DefaultsKey.mode) ?? "")
-        sourceMode = restoredMode == .captureDevice ? .captureDevice : .systemPicker
+        sourceMode = .systemPicker
         selectedApplicationID = defaults.string(forKey: DefaultsKey.application)
         let savedWindow = defaults.object(forKey: DefaultsKey.window) as? NSNumber
         selectedWindowID = savedWindow.map { CGWindowID($0.uint32Value) }
@@ -135,11 +136,14 @@ final class LiveCaptureManager: ObservableObject {
         guard !hotkeyInstalled else { return }
         hotkeyInstalled = true
 
-        GlobalCaptureHotkey.shared.install { [weak self] in
-            Task { @MainActor in
-                await self?.startHotkeyScanSession()
+        GlobalCaptureHotkey.shared.install(
+            onStart: { [weak self] in
+                Task { @MainActor in await self?.startHotkeyScanSession() }
+            },
+            onStop: { [weak self] in
+                Task { @MainActor in await self?.stopHotkeyScanSession() }
             }
-        }
+        )
         accessibilityGranted = GlobalCaptureHotkey.shared.hasAccessibilityPermission
 
         Task { [weak self] in
@@ -159,7 +163,7 @@ final class LiveCaptureManager: ObservableObject {
     func requestScreenRecordingPermission() {
         screenRecordingGranted = CGRequestScreenCaptureAccess()
         statusText = screenRecordingGranted
-            ? "Screen Recording access granted. You can select the Fortnite area now."
+            ? "Screen Recording access granted. Press Control + Option + S and select the Fortnite window."
             : "Allow Screen Recording for Sprite Vault in System Settings. macOS may require a relaunch."
     }
 
@@ -185,52 +189,32 @@ final class LiveCaptureManager: ObservableObject {
         }
     }
 
-    /// Recommended source picker. Apple's ScreenCaptureKit picker can select a
-    /// full-screen Fortnite/OBS window or an entire display even when that content
-    /// lives in another macOS Space. This is more reliable than trying to draw an
-    /// AppKit drag overlay over another app's exclusive full-screen Space.
+    /// Manual entry point for the same window-only picker used by the scan
+    /// hotkey. Region/display selection is intentionally not supported.
     func chooseSystemCaptureSource() {
-        guard !isStreaming else { return }
+        guard !isStreaming, !isSelectingWindow else { return }
         sourceMode = .systemPicker
         errorText = nil
-        statusText = "Choose the Fortnite window or display in the macOS capture picker…"
+        isSelectingWindow = true
+        let requestID = UUID()
+        windowSelectionRequestID = requestID
+        statusText = "Choose the window that contains Fortnite…"
 
-        captureService.presentSystemPicker { [weak self] selection in
+        captureService.presentWindowPicker { [weak self] selection in
             Task { @MainActor in
                 guard let self else { return }
+                guard self.windowSelectionRequestID == requestID else { return }
+                self.windowSelectionRequestID = nil
+                self.isSelectingWindow = false
                 guard let selection else {
                     if self.systemSelection == nil {
-                        self.statusText = "No Fortnite source selected yet."
+                        self.statusText = "Window selection cancelled."
                     }
                     return
                 }
 
                 self.systemSelection = selection
                 self.statusText = "Selected \(selection.displayName) · \(selection.sizeText). Ready to scan."
-            }
-        }
-    }
-
-    /// Optional screenshot-style crop for windowed setups. Full-screen users
-    /// should use chooseSystemCaptureSource(), which works across Spaces.
-    func chooseRegionCaptureSource() {
-        guard !isStreaming else { return }
-        sourceMode = .systemPicker
-        errorText = nil
-        statusText = "Drag around the full Fortnite viewport…"
-
-        captureService.presentRegionSelector { [weak self] selection in
-            Task { @MainActor in
-                guard let self else { return }
-                guard let selection else {
-                    if self.systemSelection == nil {
-                        self.statusText = "No custom area selected."
-                    }
-                    return
-                }
-
-                self.systemSelection = selection
-                self.statusText = "Selected custom area · \(selection.sizeText). Ready to scan."
             }
         }
     }
@@ -249,20 +233,20 @@ final class LiveCaptureManager: ObservableObject {
         defer { isRefreshing = false }
 
         screenRecordingGranted = CGPreflightScreenCaptureAccess()
+        if sourceMode == .systemPicker {
+            if let existingSelection = captureService.systemSelection {
+                systemSelection = existingSelection
+            }
+            statusText = sourceReadyDescription
+            return
+        }
+
+        // Legacy capture helpers remain isolated from the active window-only
+        // path, which never pays their device/application enumeration cost.
         captureDeviceGranted = captureDeviceService.authorizationGranted
         captureDevices = captureDeviceService.availableDevices()
         if selectedCaptureDeviceID == nil || !captureDevices.contains(where: { $0.id == selectedCaptureDeviceID }) {
             selectedCaptureDeviceID = captureDevices.first?.id
-        }
-
-        if sourceMode == .systemPicker {
-            if let existingSelection = captureService.systemSelection {
-                systemSelection = existingSelection
-            } else {
-                systemSelection = await captureService.restoreSavedRegionSelection()
-            }
-            statusText = sourceReadyDescription
-            return
         }
 
         if sourceMode == .captureDevice {
@@ -418,7 +402,7 @@ final class LiveCaptureManager: ObservableObject {
     func captureOnce() async {
         guard !isCapturingOnce, !isStreaming else { return }
         guard sourceMode != .captureDevice else {
-            errorText = "Capture Once is available for screen-area capture. Use Start Scan for a capture device."
+            errorText = "Scan Current View is available after choosing a Fortnite window."
             return
         }
 
@@ -455,14 +439,16 @@ final class LiveCaptureManager: ObservableObject {
         }
     }
 
-    /// Control + Option + S starts one collection session. A second hotkey press
-    /// does not stop it; the scan ends automatically only after all 117 catalog
-    /// positions have actually been covered, or by the explicit Stop control.
+    /// Control + Option + S always starts with Apple's window picker. Reusing a
+    /// stale source was the main reason overlays appeared on unrelated windows.
+    /// Control + Option + X cancels the picker or stops the active scan.
     func startHotkeyScanSession() async {
-        guard !isHotkeyScanning else {
+        guard !isHotkeyScanning, !isSelectingWindow else {
             notificationService.send(
                 title: "Sprite Scan Already Active",
-                body: "The current scan is still running. Fast scrolling is ignored until the grid becomes stable.",
+                body: isSelectingWindow
+                    ? "Choose the Fortnite window, or press Control + Option + X to cancel."
+                    : "The current scan is still running. Press Control + Option + X to stop it.",
                 identifier: "sprite-scan-already-active",
                 openActivityCenter: true
             )
@@ -470,10 +456,21 @@ final class LiveCaptureManager: ObservableObject {
         }
         guard !isStreaming, !isCapturingOnce else { return }
 
-        if sourceMode == .captureDevice && captureDevices.isEmpty {
-            await refreshSources()
+        sourceMode = .systemPicker
+        screenRecordingGranted = CGPreflightScreenCaptureAccess()
+        guard screenRecordingGranted else {
+            await failToStart("Screen Recording permission is required. Enable Sprite Vault in System Settings, then press Control + Option + S again.")
+            return
         }
-        guard await ensureSourceReady() else { return }
+
+        errorText = nil
+        scanPhase = .waitingForSource
+        statusText = "Select the Fortnite window · Cancel/stop with Control + Option + X."
+        guard await selectWindowForScan() else {
+            scanPhase = .idle
+            statusText = "Window selection cancelled. Press Control + Option + S to try again."
+            return
+        }
 
         if targetProfileID == nil { targetProfileID = store?.selectedProfileID }
         if !notificationsGranted {
@@ -486,7 +483,7 @@ final class LiveCaptureManager: ObservableObject {
         sessionProfileName = targetProfile?.name ?? "My Collection"
         isHotkeyScanning = true
         errorText = nil
-        scanPhase = .waitingForSource
+        scanPhase = .waitingForCollection
         startSessionTimer()
 
         let startEvent = ActivityEvent(
@@ -500,7 +497,7 @@ final class LiveCaptureManager: ObservableObject {
         activityStore?.add(startEvent)
         notificationService.send(
             title: "Sprite Scan Started",
-            body: "Reading \(sessionProfileName). Fast scrolling will pause Vision until the collection is stable.",
+            body: "Open Sprites → Collection. Stop any time with Control + Option + X.",
             identifier: "sprite-scan-started",
             openActivityCenter: true
         )
@@ -517,6 +514,39 @@ final class LiveCaptureManager: ObservableObject {
                 openActivityCenter: true
             )
         }
+    }
+
+    func stopHotkeyScanSession() async {
+        if isSelectingWindow {
+            windowSelectionRequestID = nil
+            captureService.cancelWindowPicker()
+            isSelectingWindow = false
+            scanPhase = .idle
+            statusText = "Window selection cancelled."
+            return
+        }
+
+        guard isHotkeyScanning || isStreaming else { return }
+        await stopStreaming()
+    }
+
+    private func selectWindowForScan() async -> Bool {
+        let requestID = UUID()
+        windowSelectionRequestID = requestID
+        isSelectingWindow = true
+        let selection: SystemCaptureSelection? = await withCheckedContinuation {
+            (continuation: CheckedContinuation<SystemCaptureSelection?, Never>) in
+            captureService.presentWindowPicker { selection in
+                continuation.resume(returning: selection)
+            }
+        }
+        guard windowSelectionRequestID == requestID else { return false }
+        windowSelectionRequestID = nil
+        isSelectingWindow = false
+        guard let selection else { return false }
+        systemSelection = selection
+        statusText = "Selected \(selection.displayName) · checking the Sprites tab…"
+        return true
     }
 
     func startStreaming() async {
@@ -603,7 +633,7 @@ final class LiveCaptureManager: ObservableObject {
 
             isStreaming = true
             scanPhase = .waitingForCollection
-            statusText = "Capture active. Waiting for Fortnite Sprites → Collection…"
+            statusText = "Capture active. Open Fortnite Sprites → Collection · Stop ⌃⌥X."
         } catch {
             isStreaming = false
             errorText = error.localizedDescription
@@ -694,6 +724,7 @@ final class LiveCaptureManager: ObservableObject {
     }
 
     var shortcutText: String { "⌃⌥S" }
+    var stopShortcutText: String { "⌃⌥X" }
 
     var selectedWindow: CaptureWindowInfo? {
         guard let selectedWindowID else { return nil }
@@ -763,7 +794,7 @@ final class LiveCaptureManager: ObservableObject {
             if let selection = systemSelection {
                 return "Ready: \(selection.styleName) — \(selection.displayName) · \(selection.sizeText)."
             }
-            return "Select the Fortnite window/display. Use Custom Area only for windowed setups."
+            return "Press Control + Option + S, then select the window containing Fortnite."
         case .application:
             if let app = selectedApplication {
                 if let target = resolvedApplicationTarget {
@@ -783,7 +814,7 @@ final class LiveCaptureManager: ObservableObject {
         switch sourceMode {
         case .systemPicker:
             guard systemSelection != nil, captureService.hasSystemSelection else {
-                await failToStart("Select the Fortnite window/display or a custom area in Live Capture first.")
+                await failToStart("Select the Fortnite window first.")
                 return false
             }
             guard screenRecordingGranted || CGPreflightScreenCaptureAccess() else {
@@ -872,11 +903,14 @@ final class LiveCaptureManager: ObservableObject {
 
         guard analysis.isCollectionScreen else {
             scanPhase = .waitingForCollection
-            statusText = "Capture is active — waiting for Fortnite Sprites → Collection."
+            statusText = "Please open Fortnite Sprites → Collection · Stop with Control + Option + X."
             return
         }
 
-        if let pageStart = analysis.inferredPageStart {
+        if !analysis.coveredCatalogIndexes.isEmpty {
+            coveredCatalogIndexes.formUnion(analysis.coveredCatalogIndexes)
+            scanCoverageCount = coveredCatalogIndexes.count
+        } else if let pageStart = analysis.inferredPageStart {
             let end = min(pageStart + max(analysis.visibleSlots, 1) - 1, totalSpriteCount - 1)
             if pageStart <= end {
                 for index in pageStart...end { coveredCatalogIndexes.insert(index) }
@@ -904,11 +938,29 @@ final class LiveCaptureManager: ObservableObject {
             lastDetectionSignature = signature
             latestDetections = analysis.detections
             resultRevision = UUID()
+            checkForAutomaticCompletion(afterApplying: true)
+            saveConfirmedDetections(analysis.detections)
+        } else {
+            checkForAutomaticCompletion(afterApplying: false)
         }
 
         scanPhase = .scanning
         statusText = "Scanning · collection \(targetCollectionCount)/\(totalSpriteCount) · coverage \(scanCoverageCount)/\(totalSpriteCount) · \(changesSoFar) changes."
-        checkForAutomaticCompletion(afterApplying: isNewDetectionPage)
+    }
+
+    /// Save from the manager, not from ContentView. A scan must remain durable
+    /// when the main window is hidden and only the menu-bar companion is alive.
+    private func saveConfirmedDetections(_ detections: [DetectedSprite]) {
+        guard !detections.isEmpty, let store else { return }
+        let profileID = targetProfileID ?? store.selectedProfileID
+        guard let profile = store.profile(withID: profileID) else { return }
+
+        let summary = store.applyDetections(
+            detections,
+            to: profileID,
+            replacingExisting: false
+        )
+        reportAppliedChanges(summary, profileName: profile.name)
     }
 
     private func checkForAutomaticCompletion(afterApplying: Bool) {

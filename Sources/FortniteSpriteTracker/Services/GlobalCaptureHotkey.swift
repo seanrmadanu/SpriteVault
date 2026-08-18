@@ -7,7 +7,8 @@ final class GlobalCaptureHotkey {
 
     private var globalMonitor: Any?
     private var localMonitor: Any?
-    private var handler: (() -> Void)?
+    private var startHandler: (() -> Void)?
+    private var stopHandler: (() -> Void)?
 
     private init() {}
 
@@ -22,23 +23,27 @@ final class GlobalCaptureHotkey {
         return AXIsProcessTrustedWithOptions(options)
     }
 
-    func install(handler: @escaping () -> Void) {
-        self.handler = handler
+    func install(
+        onStart: @escaping () -> Void,
+        onStop: @escaping () -> Void
+    ) {
+        startHandler = onStart
+        stopHandler = onStop
         guard globalMonitor == nil, localMonitor == nil else { return }
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard Self.matchesCaptureShortcut(event) else { return }
+            guard let action = Self.action(for: event) else { return }
             Task { @MainActor in
-                self?.handler?()
+                self?.perform(action)
             }
         }
 
         // Global monitors intentionally don't receive events sent to this app.
         // The local monitor makes the same shortcut work while Sprite Vault is focused.
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard Self.matchesCaptureShortcut(event) else { return event }
+            guard let action = Self.action(for: event) else { return event }
             Task { @MainActor in
-                self?.handler?()
+                self?.perform(action)
             }
             return nil
         }
@@ -53,19 +58,35 @@ final class GlobalCaptureHotkey {
             NSEvent.removeMonitor(localMonitor)
             self.localMonitor = nil
         }
-        handler = nil
+        startHandler = nil
+        stopHandler = nil
     }
 
-    private static func matchesCaptureShortcut(_ event: NSEvent) -> Bool {
-        guard !event.isARepeat,
-              event.charactersIgnoringModifiers?.lowercased() == "s" else {
-            return false
+    private func perform(_ action: HotkeyAction) {
+        switch action {
+        case .start: startHandler?()
+        case .stop: stopHandler?()
         }
+    }
+
+    private static func action(for event: NSEvent) -> HotkeyAction? {
+        guard !event.isARepeat else { return nil }
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let required: NSEvent.ModifierFlags = [.control, .option]
-        return flags.contains(required)
-            && !flags.contains(.command)
-            && !flags.contains(.shift)
+        guard flags.contains(required),
+              !flags.contains(.command),
+              !flags.contains(.shift) else { return nil }
+
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "s": return .start
+        case "x": return .stop
+        default: return nil
+        }
     }
+}
+
+private enum HotkeyAction {
+    case start
+    case stop
 }

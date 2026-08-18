@@ -55,9 +55,9 @@ struct SpriteMenuBarView: View {
             Divider()
 
             HStack(spacing: 8) {
-                if liveCapture.isHotkeyScanning {
-                    Button("Stop Scan", role: .destructive) {
-                        Task { await liveCapture.stopStreaming() }
+                if liveCapture.isHotkeyScanning || liveCapture.isSelectingWindow {
+                    Button("Stop \(liveCapture.stopShortcutText)", role: .destructive) {
+                        Task { await liveCapture.stopHotkeyScanSession() }
                     }
                 } else {
                     Button("Start Scan \(liveCapture.shortcutText)") {

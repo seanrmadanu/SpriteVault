@@ -11,7 +11,7 @@ enum CaptureSourceMode: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .systemPicker: return "Screen / Window"
+        case .systemPicker: return "Window Picker"
         case .application: return "Application"
         case .window: return "Specific Window"
         case .captureDevice: return "Capture Device"

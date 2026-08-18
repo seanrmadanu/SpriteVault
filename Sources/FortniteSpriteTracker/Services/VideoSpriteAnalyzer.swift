@@ -36,6 +36,9 @@ struct SpriteFrameAnalysis: Sendable {
     let isCollectionScreen: Bool
     let visibleSlots: Int
     let inferredPageStart: Int?
+    /// Exact catalog positions confirmed visible in this stable frame. This
+    /// avoids treating ignored partial rows as scan coverage.
+    let coveredCatalogIndexes: Set<Int>
     let lockedSlots: Set<Int>
     let needsHelpSlots: Set<Int>
     let selectedSpriteName: String?

@@ -38,11 +38,9 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
 
     private var selectedSystemFilter: SCContentFilter?
     private var selectedSystemSelection: SystemCaptureSelection?
-    private var selectedSourceRect: CGRect?
     private var selectedOverlayRect: CGRect?
     private var latestStableFrame: CGImage?
     private let overlayController = SpriteScanOverlayController()
-    private var regionSelector: ScreenRegionSelector?
     private var pickerSelectionHandler: PickerSelectionHandler?
     private var pickerObserverInstalled = false
 
@@ -55,61 +53,11 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         }
     }
 
-    /// Screenshot-style region selection. The user can drag around the exact
-    /// Fortnite pixels regardless of whether they come from OBS, Remote Play,
-    /// GeForce NOW, a browser, or a full-screen projector.
-    @MainActor
-    func presentRegionSelector(onSelection: @escaping PickerSelectionHandler) {
-        regionSelector?.cancel()
-        let selector = ScreenRegionSelector { [weak self] screen, localRect in
-            guard let self else { return }
-            self.regionSelector = nil
-            guard let screen, let localRect else {
-                onSelection(nil)
-                return
-            }
-
-            Task {
-                do {
-                    let selection = try await self.configureRegion(screen: screen, localRect: localRect)
-                    onSelection(selection)
-                } catch {
-                    self.onError?(error)
-                    onSelection(nil)
-                }
-            }
-        }
-        regionSelector = selector
-        selector.begin()
-    }
-
-    @MainActor
-    func restoreSavedRegionSelection() async -> SystemCaptureSelection? {
-        guard selectedSystemFilter == nil,
-              let saved = SavedCaptureRegion.load() else {
-            return selectedSystemSelection
-        }
-
-        let screen = await MainActor.run {
-            NSScreen.screens.first(where: { Self.displayID(for: $0) == saved.displayID })
-        }
-        guard let screen else { return nil }
-
-        let localRect = CGRect(x: saved.x, y: saved.y, width: saved.width, height: saved.height)
-        do {
-            return try await configureRegion(screen: screen, localRect: localRect, persist: false)
-        } catch {
-            return nil
-        }
-    }
-
-    /// The older native sharing picker remains available internally as a
-    /// fallback, but Live Capture now uses the region selector above.
-    /// Presents Apple's native ScreenCaptureKit sharing picker. This is the
-    /// same system-level content picker ScreenCaptureKit recommends instead of
-    /// maintaining our own fragile list of windows. It can see displays and
-    /// windows across Spaces, including full-screen OBS projector surfaces.
-    func presentSystemPicker(onSelection: @escaping PickerSelectionHandler) {
+    /// Presents Apple's native ScreenCaptureKit window picker. The scan hotkey
+    /// deliberately invokes this every time so the source is explicit and a
+    /// stale source selection can never attach overlays to another app.
+    func presentWindowPicker(onSelection: @escaping PickerSelectionHandler) {
+        cancelWindowPicker(notify: false)
         pickerSelectionHandler = onSelection
 
         let picker = SCContentSharingPicker.shared
@@ -119,9 +67,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         }
 
         var configuration = SCContentSharingPickerConfiguration()
-        let modesRawValue = SCContentSharingPickerMode.singleWindow.rawValue
-            | SCContentSharingPickerMode.singleDisplay.rawValue
-        configuration.allowedPickerModes = SCContentSharingPickerMode(rawValue: modesRawValue)
+        configuration.allowedPickerModes = .singleWindow
         configuration.allowsChangingSelectedContent = true
         if let bundleID = Bundle.main.bundleIdentifier {
             configuration.excludedBundleIDs = [bundleID]
@@ -131,20 +77,29 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         picker.present()
     }
 
+    func cancelWindowPicker() {
+        cancelWindowPicker(notify: true)
+    }
+
+    private func cancelWindowPicker(notify: Bool) {
+        let handler = pickerSelectionHandler
+        pickerSelectionHandler = nil
+        SCContentSharingPicker.shared.isActive = false
+        if notify { handler?(nil) }
+    }
+
     func clearSystemSelection() {
         selectedSystemFilter = nil
         selectedSystemSelection = nil
-        selectedSourceRect = nil
         selectedOverlayRect = nil
         DispatchQueue.main.async { [overlayController] in overlayController.hide() }
-        SavedCaptureRegion.clear()
     }
 
     func captureSystemSelectionOnce() async throws -> CGImage {
         guard let filter = selectedSystemFilter else {
             throw ScreenCaptureServiceError.noSystemSelection
         }
-        let configuration = configuration(for: filter, fps: 12, sourceRect: selectedSourceRect)
+        let configuration = configuration(for: filter, fps: 20)
         return try await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
@@ -163,7 +118,6 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         }
         try await start(
             filter: filter,
-            sourceRect: selectedSourceRect,
             fps: fps,
             onAnalysis: onAnalysis,
             onStatus: onStatus,
@@ -264,7 +218,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     func captureOnce(windowID: CGWindowID) async throws -> CGImage {
         let window = try await shareableWindow(withID: windowID)
         let filter = SCContentFilter(desktopIndependentWindow: window)
-        let configuration = configuration(for: filter, fps: 12, sourceRect: nil)
+        let configuration = configuration(for: filter, fps: 12)
         return try await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
@@ -284,7 +238,6 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         let filter = SCContentFilter(desktopIndependentWindow: window)
         try await start(
             filter: filter,
-            sourceRect: nil,
             fps: fps,
             onAnalysis: onAnalysis,
             onStatus: onStatus,
@@ -295,7 +248,6 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
 
     private func start(
         filter: SCContentFilter,
-        sourceRect: CGRect?,
         fps: Int,
         onAnalysis: @escaping AnalysisHandler,
         onStatus: @escaping StatusHandler,
@@ -304,10 +256,10 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     ) async throws {
         if stream != nil { await stop() }
 
-        // Capture at a genuinely responsive rate. Vision is throttled separately
-        // below, so 12–15 capture FPS does not mean 12–15 OCR passes per second.
-        let clampedFPS = min(max(fps, 8), 15)
-        let configuration = configuration(for: filter, fps: clampedFPS, sourceRect: sourceRect)
+        // Capture and recognition have separate clocks. The overlay gets a
+        // responsive 12–30 FPS feed while Vision remains stability-gated below.
+        let clampedFPS = min(max(fps, 12), 30)
+        let configuration = configuration(for: filter, fps: clampedFPS)
 
         self.onAnalysis = onAnalysis
         self.onStatus = onStatus
@@ -328,7 +280,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         if let overlayRect = selectedOverlayRect {
             DispatchQueue.main.async { [overlayController] in
                 overlayController.show(over: overlayRect)
-                overlayController.showWaiting(message: "Finding Sprite Collection…")
+                overlayController.showWaiting(message: "Open Sprites → Collection · Stop ⌃⌥X")
             }
         }
 
@@ -342,7 +294,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
             self.watchdogReportedIdle = false
             self.installWatchdog()
         }
-        onStatus("Capture connected. Waiting for the Sprite Collection to settle…")
+        onStatus("Capture connected. Checking Sprites → Collection…")
     }
 
     func stop() async {
@@ -378,16 +330,15 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         pickerSelectionHandler = nil
         picker.isActive = false
 
-        Task { [weak self] in
-            guard let self else { return }
-            let cleanFilter = await self.filterExcludingSpriteVaultIfNeeded(filter)
-            self.selectedSystemFilter = cleanFilter
-            self.selectedSourceRect = nil
-            self.selectedOverlayRect = Self.resolveOverlayRect(for: cleanFilter)
-            let selection = Self.describeSystemSelection(cleanFilter)
-            self.selectedSystemSelection = selection
-            handler?(selection)
+        guard filter.style == .window else {
+            handler?(nil)
+            return
         }
+        selectedSystemFilter = filter
+        selectedOverlayRect = Self.resolveOverlayRect(for: filter)
+        let selection = Self.describeSystemSelection(filter)
+        selectedSystemSelection = selection
+        handler?(selection)
     }
 
     func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
@@ -426,9 +377,9 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
             latestStableFrame = nil
             motionStateActive = false
             DispatchQueue.main.async { [overlayController] in
-                overlayController.showWaiting(message: "Capture resumed · finding collection…")
+                overlayController.showWaiting(message: "Open Sprites → Collection · Stop ⌃⌥X")
             }
-            onStatus?("Capture resumed — waiting briefly for the Sprite Collection to settle…")
+            onStatus?("Capture resumed — checking Sprites → Collection…")
         }
         guard let fingerprint = motionFingerprint(pixelBuffer) else { return }
 
@@ -458,9 +409,6 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
 
         if motionStateActive {
             motionStateActive = false
-            DispatchQueue.main.async { [overlayController] in
-                overlayController.beginProcessing()
-            }
             onStatus?("Screen stable — scanner active.")
         }
 
@@ -485,10 +433,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         lastAnalysisStarted = now
         lastAnalyzedFingerprint = fingerprint
         latestStableFrame = cgImage
-        DispatchQueue.main.async { [overlayController] in
-            overlayController.beginProcessing()
-        }
-        onStatus?("Stable view found — reading left grid and right Sprite details…")
+        onStatus?("Stable view found — validating the Sprites tab…")
 
         Task { [weak self] in
             guard let self else { return }
@@ -501,7 +446,21 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
             do {
                 let analysis = try await ScreenshotSpriteAnalyzer.shared.analyzeFrame(
                     image: cgImage,
-                    onProgress: { _, _ in }
+                    onProgress: { _, _ in },
+                    onCollectionValidated: { [weak self] in
+                        guard let self else { return }
+                        DispatchQueue.main.async { [overlayController = self.overlayController] in
+                            // Processing boxes are shown only after the current
+                            // frame has passed the strict tab-selection gate.
+                            overlayController.beginProcessing()
+                        }
+                    },
+                    onCardsAligned: { [weak self] anchors in
+                        guard let self else { return }
+                        DispatchQueue.main.async { [overlayController = self.overlayController] in
+                            overlayController.showProcessing(anchors: anchors)
+                        }
+                    }
                 )
                 DispatchQueue.main.async { [overlayController] in
                     overlayController.update(with: analysis)
@@ -547,6 +506,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
                             isCollectionScreen: true,
                             visibleSlots: 0,
                             inferredPageStart: nil,
+                            coveredCatalogIndexes: [],
                             lockedSlots: [],
                             needsHelpSlots: [],
                             selectedSpriteName: detection.name,
@@ -562,102 +522,6 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
                 }
             }
         }
-    }
-
-    /// A desktop-independent window filter only contains the selected app
-    /// window, so our overlay cannot appear in it. A whole-display picker filter
-    /// does include other app windows, however. Rebuild that case with Sprite
-    /// Vault excluded so the user sees magenta feedback while Vision sees clean
-    /// Fortnite pixels.
-    private func filterExcludingSpriteVaultIfNeeded(_ filter: SCContentFilter) async -> SCContentFilter {
-        guard #available(macOS 15.2, *),
-              filter.style == .display,
-              let display = filter.includedDisplays.first,
-              let ownBundleID = Bundle.main.bundleIdentifier else {
-            return filter
-        }
-
-        do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-            let ownApps = content.applications.filter { $0.bundleIdentifier == ownBundleID }
-            guard !ownApps.isEmpty else { return filter }
-            return SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
-        } catch {
-            // The original system picker filter is still usable. Falling back is
-            // better than canceling a capture simply because exclusion refresh
-            // failed transiently.
-            return filter
-        }
-    }
-
-    @MainActor
-    private func configureRegion(
-        screen: NSScreen,
-        localRect: CGRect,
-        persist: Bool = true
-    ) async throws -> SystemCaptureSelection {
-        guard let displayID = Self.displayID(for: screen) else {
-            throw ScreenCaptureServiceError.displayUnavailable
-        }
-
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
-            throw ScreenCaptureServiceError.displayUnavailable
-        }
-
-        let ownBundleID = Bundle.main.bundleIdentifier
-        let excludedApps = content.applications.filter { app in
-            guard let ownBundleID else { return false }
-            return app.bundleIdentifier == ownBundleID
-        }
-        let filter = SCContentFilter(display: display, excludingApplications: excludedApps, exceptingWindows: [])
-
-        let clamped = CGRect(
-            x: max(0, min(localRect.minX, screen.frame.width - 1)),
-            y: max(0, min(localRect.minY, screen.frame.height - 1)),
-            width: max(1, min(localRect.width, screen.frame.width - max(localRect.minX, 0))),
-            height: max(1, min(localRect.height, screen.frame.height - max(localRect.minY, 0)))
-        )
-
-        // AppKit view coordinates start at the bottom-left. ScreenCaptureKit's
-        // display source rectangle uses the display's logical coordinate system
-        // with the top edge as y=0, so flip the local y coordinate.
-        let sourceRect = CGRect(
-            x: clamped.minX,
-            y: screen.frame.height - clamped.maxY,
-            width: clamped.width,
-            height: clamped.height
-        )
-
-        selectedSystemFilter = filter
-        selectedSourceRect = sourceRect
-        selectedOverlayRect = CGRect(
-            x: screen.frame.minX + clamped.minX,
-            y: screen.frame.minY + clamped.minY,
-            width: clamped.width,
-            height: clamped.height
-        )
-
-        let scale = max(screen.backingScaleFactor, 1)
-        let selection = SystemCaptureSelection(
-            styleName: "Area",
-            displayName: "Selected Fortnite Area",
-            detail: "\(screen.localizedName) · drag-selected region",
-            width: max(Int((clamped.width * scale).rounded()), 1),
-            height: max(Int((clamped.height * scale).rounded()), 1)
-        )
-        selectedSystemSelection = selection
-
-        if persist {
-            SavedCaptureRegion(
-                displayID: displayID,
-                x: clamped.minX,
-                y: clamped.minY,
-                width: clamped.width,
-                height: clamped.height
-            ).save()
-        }
-        return selection
     }
 
     private static func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
@@ -681,7 +545,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
             self.lastAnalyzedFingerprint = nil
             self.motionStateActive = false
             DispatchQueue.main.async { [overlayController = self.overlayController] in
-                overlayController.showWaiting(message: "Capture idle · waiting for frames")
+                overlayController.showWaiting(message: "Capture idle · Stop ⌃⌥X")
             }
             self.onStatus?("Capture source is temporarily idle — scanning will resume automatically when frames return.")
         }
@@ -713,8 +577,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
 
     private func configuration(
         for filter: SCContentFilter,
-        fps: Int,
-        sourceRect: CGRect?
+        fps: Int
     ) -> SCStreamConfiguration {
         let configuration = SCStreamConfiguration()
         configuration.capturesAudio = false
@@ -722,15 +585,8 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         configuration.queueDepth = 2
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(fps, 1)))
 
-        // sourceRect is expressed in the display's logical point coordinate
-        // system. Capturing only that region keeps Vision away from unrelated
-        // desktop pixels and avoids an extra crop on every frame.
-        if let sourceRect {
-            configuration.sourceRect = sourceRect
-        }
-
         let pixelScale = max(CGFloat(filter.pointPixelScale), 1)
-        let sourceSize = sourceRect?.size ?? filter.contentRect.size
+        let sourceSize = filter.contentRect.size
         let nativeWidth = max(sourceSize.width * pixelScale, 1)
         let nativeHeight = max(sourceSize.height * pixelScale, 1)
         // 1280 px is enough for the Fortnite card grid/right-panel OCR while
@@ -994,12 +850,17 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
     private var panel: NSPanel?
     private var overlayView: SpriteScanOverlayView?
     private var hoverTimer: Timer?
+    private var animationTimer: Timer?
     private var hoveredSlot: Int?
     private var hoverStartedAt: TimeInterval = 0
     private var deepScannedSlots = Set<Int>()
     private var rememberedStates: [Int: RememberedOverlayState] = [:]
+    private var requiresRealignment = false
 
-    deinit { hoverTimer?.invalidate() }
+    deinit {
+        hoverTimer?.invalidate()
+        animationTimer?.invalidate()
+    }
 
     func show(over frame: CGRect) {
         precondition(Thread.isMainThread)
@@ -1010,6 +871,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
             panel.setFrame(usableFrame, display: true)
             panel.orderFrontRegardless()
             startHoverTracking()
+            startAnimationTimer()
             return
         }
 
@@ -1040,15 +902,19 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         self.overlayView = view
         panel.orderFrontRegardless()
         startHoverTracking()
+        startAnimationTimer()
     }
 
     func hide() {
         precondition(Thread.isMainThread)
         hoverTimer?.invalidate()
         hoverTimer = nil
+        animationTimer?.invalidate()
+        animationTimer = nil
         hoveredSlot = nil
         deepScannedSlots.removeAll()
         rememberedStates.removeAll()
+        requiresRealignment = false
         panel?.orderOut(nil)
         panel = nil
         overlayView = nil
@@ -1057,6 +923,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
     func showWaiting(message: String) {
         precondition(Thread.isMainThread)
         deepScannedSlots.removeAll()
+        requiresRealignment = false
         hoveredSlot = nil
         overlayView?.hoveredSlot = nil
         overlayView?.mode = .waiting
@@ -1069,14 +936,15 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
     func showMoving() {
         precondition(Thread.isMainThread)
         // Do not leave a fixed stencil sitting over the game while Fortnite is
-        // scrolling. Keep remembered identities internally, hide the card boxes,
-        // then re-anchor them from the next stable frame.
+        // scrolling. Keep the last confirmed anchors internally, hide the card
+        // boxes, then reuse them for animated processing dots only after the next
+        // stable frame passes the strict Sprites/Collection gate.
         deepScannedSlots.removeAll()
+        requiresRealignment = true
         hoveredSlot = nil
         overlayView?.hoveredSlot = nil
         overlayView?.mode = .moving
         overlayView?.statusText = "Tracking scroll · aligning cards…"
-        overlayView?.cardAnchors = []
         overlayView?.cardStates = [:]
         overlayView?.needsDisplay = true
     }
@@ -1092,11 +960,15 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         }
 
         var states = view.cardStates
+        let forceProcessing = requiresRealignment
+        requiresRealignment = false
         for anchor in view.cardAnchors {
-            if let current = states[anchor.slot], current.isResolvedIdentity {
+            if !forceProcessing,
+               let current = states[anchor.slot], current.isResolvedIdentity {
                 continue
             }
-            if let remembered = rememberedStates[anchor.slot],
+            if !forceProcessing,
+               let remembered = rememberedStates[anchor.slot],
                signaturesMatch(remembered.signature, anchor.visualSignature),
                remembered.state.isResolvedIdentity {
                 states[anchor.slot] = remembered.state
@@ -1110,10 +982,26 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         view.needsDisplay = true
     }
 
+    func showProcessing(anchors: [SpriteCardAnchor]) {
+        precondition(Thread.isMainThread)
+        guard let view = overlayView, !anchors.isEmpty else { return }
+        let aligned = anchors.sorted { $0.slot < $1.slot }
+        hoveredSlot = nil
+        view.hoveredSlot = nil
+        view.cardAnchors = aligned
+        view.cardStates = Dictionary(uniqueKeysWithValues: aligned.map {
+            ($0.slot, SpriteOverlayCardState.processing)
+        })
+        view.mode = .collection
+        view.statusText = "Reading aligned Sprite cards…"
+        requiresRealignment = false
+        view.needsDisplay = true
+    }
+
     func update(with analysis: SpriteFrameAnalysis) {
         precondition(Thread.isMainThread)
         guard analysis.isCollectionScreen else {
-            showWaiting(message: "Finding Sprite Collection…")
+            showWaiting(message: "Please open Sprites → Collection · Stop ⌃⌥X")
             return
         }
         guard let view = overlayView else { return }
@@ -1222,6 +1110,18 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         if let hoverTimer { RunLoop.main.add(hoverTimer, forMode: .common) }
     }
 
+    private func startAnimationTimer() {
+        animationTimer?.invalidate()
+        animationTimer = Timer.scheduledTimer(withTimeInterval: 0.34, repeats: true) { [weak self] _ in
+            guard let view = self?.overlayView else { return }
+            view.processingPhase = (view.processingPhase + 1) % 3
+            if view.cardStates.values.contains(.processing) {
+                view.needsDisplay = true
+            }
+        }
+        if let animationTimer { RunLoop.main.add(animationTimer, forMode: .common) }
+    }
+
     private func pollMouse() {
         guard let panel, let view = overlayView, view.mode == .collection else { return }
         let globalPoint = NSEvent.mouseLocation
@@ -1277,6 +1177,7 @@ private final class SpriteScanOverlayView: NSView {
     var cardStates: [Int: SpriteOverlayCardState] = [:]
     var cardAnchors: [SpriteCardAnchor] = []
     var hoveredSlot: Int?
+    var processingPhase = 0
 
     private let magenta = NSColor(calibratedRed: 1.0, green: 0.10, blue: 0.72, alpha: 1.0)
 
@@ -1322,7 +1223,7 @@ private final class SpriteScanOverlayView: NSView {
         let badgeText: String
         switch state {
         case .processing:
-            badgeText = "•••"
+            badgeText = String(repeating: "•", count: processingPhase + 1)
         case let .recognized(_, level, mastered):
             badgeText = "👍\(level.map { " L\($0)" } ?? "")\(mastered ? " 👑" : "")"
         case let .needsHelp(prompt):
@@ -1330,7 +1231,7 @@ private final class SpriteScanOverlayView: NSView {
         case .locked:
             badgeText = "🔒"
         case let .lost(_, level, mastered):
-            badgeText = "LOST\(level.map { " L\($0)" } ?? "")\(mastered ? " 👑" : "")"
+            badgeText = "SUMMON\(level.map { " L\($0)" } ?? "")\(mastered ? " 👑" : "")"
         }
         drawBadge(text: badgeText, in: card)
 
@@ -1455,215 +1356,16 @@ private final class SpriteScanOverlayView: NSView {
     }
 }
 
-private struct SavedCaptureRegion: Codable {
-    let displayID: CGDirectDisplayID
-    let x: CGFloat
-    let y: CGFloat
-    let width: CGFloat
-    let height: CGFloat
-
-    private static let key = "capture.region.selection.v1"
-
-    func save() {
-        guard let data = try? JSONEncoder().encode(self) else { return }
-        UserDefaults.standard.set(data, forKey: Self.key)
-    }
-
-    static func load() -> SavedCaptureRegion? {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(SavedCaptureRegion.self, from: data)
-    }
-
-    static func clear() {
-        UserDefaults.standard.removeObject(forKey: key)
-    }
-}
-
-@MainActor
-private final class ScreenRegionSelector {
-    typealias Completion = (NSScreen?, CGRect?) -> Void
-
-    private let completion: Completion
-    private var windows: [RegionSelectionWindow] = []
-    private var hiddenAppWindows: [NSWindow] = []
-    private var eventMonitor: Any?
-    private var finished = false
-
-    init(completion: @escaping Completion) {
-        self.completion = completion
-    }
-
-    func begin() {
-        // Get Sprite Vault itself out of the way before the screenshot-style
-        // drag starts. The overlay windows stay visible while the normal app
-        // windows are temporarily ordered out.
-        hiddenAppWindows = NSApp.windows.filter { $0.isVisible }
-        hiddenAppWindows.forEach { $0.orderOut(nil) }
-
-        for screen in NSScreen.screens {
-            let window = RegionSelectionWindow(
-                contentRect: screen.frame,
-                styleMask: [.borderless],
-                backing: .buffered,
-                defer: false,
-                screen: screen
-            )
-            window.level = .screenSaver
-            window.isOpaque = false
-            window.backgroundColor = .clear
-            window.hasShadow = false
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            window.acceptsMouseMovedEvents = true
-
-            let view = RegionSelectionView(frame: CGRect(origin: .zero, size: screen.frame.size))
-            view.onSelection = { [weak self] rect in
-                self?.finish(screen: screen, rect: rect)
-            }
-            window.contentView = view
-            windows.append(window)
-            window.orderFrontRegardless()
-        }
-
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 {
-                self?.cancel()
-                return nil
-            }
-            return event
-        }
-    }
-
-    func cancel() {
-        finish(screen: nil, rect: nil)
-    }
-
-    private func finish(screen: NSScreen?, rect: CGRect?) {
-        guard !finished else { return }
-        finished = true
-        if let eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
-            self.eventMonitor = nil
-        }
-        windows.forEach { $0.orderOut(nil) }
-        windows.removeAll()
-        hiddenAppWindows.forEach { $0.orderFront(nil) }
-        hiddenAppWindows.last?.makeKey()
-        hiddenAppWindows.removeAll()
-        NSApp.activate(ignoringOtherApps: true)
-        completion(screen, rect)
-    }
-}
-
-private final class RegionSelectionWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-}
-
-private final class RegionSelectionView: NSView {
-    var onSelection: ((CGRect) -> Void)?
-    private var dragStart: CGPoint?
-    private var dragCurrent: CGPoint?
-
-    override var acceptsFirstResponder: Bool { true }
-
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .crosshair)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        dragStart = point
-        dragCurrent = point
-        needsDisplay = true
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        dragCurrent = convert(event.locationInWindow, from: nil)
-        needsDisplay = true
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        dragCurrent = convert(event.locationInWindow, from: nil)
-        let rect = selectionRect
-        dragStart = nil
-        dragCurrent = nil
-        needsDisplay = true
-        guard rect.width >= 40, rect.height >= 40 else { return }
-        onSelection?(rect)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let selected = selectionRect
-        NSColor.black.withAlphaComponent(0.44).setFill()
-        if selected.isEmpty {
-            NSBezierPath(rect: bounds).fill()
-            drawInstruction()
-            return
-        }
-
-        let outsideRects = [
-            CGRect(x: bounds.minX, y: selected.maxY, width: bounds.width, height: max(bounds.maxY - selected.maxY, 0)),
-            CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: max(selected.minY - bounds.minY, 0)),
-            CGRect(x: bounds.minX, y: selected.minY, width: max(selected.minX - bounds.minX, 0), height: selected.height),
-            CGRect(x: selected.maxX, y: selected.minY, width: max(bounds.maxX - selected.maxX, 0), height: selected.height)
-        ]
-        for rect in outsideRects where rect.width > 0 && rect.height > 0 {
-            NSBezierPath(rect: rect).fill()
-        }
-
-        NSColor.systemPink.setStroke()
-        let border = NSBezierPath(roundedRect: selectionRect, xRadius: 4, yRadius: 4)
-        border.lineWidth = 3
-        border.stroke()
-
-        drawInstruction()
-    }
-
-    private var selectionRect: CGRect {
-        guard let dragStart, let dragCurrent else { return .zero }
-        return CGRect(
-            x: min(dragStart.x, dragCurrent.x),
-            y: min(dragStart.y, dragCurrent.y),
-            width: abs(dragCurrent.x - dragStart.x),
-            height: abs(dragCurrent.y - dragStart.y)
-        ).intersection(bounds)
-    }
-
-    private func drawInstruction() {
-        let message = dragStart == nil
-            ? "Drag around the Fortnite area · Esc to cancel"
-            : "Release to scan only this area"
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 18, weight: .bold),
-            .foregroundColor: NSColor.white
-        ]
-        let size = message.size(withAttributes: attributes)
-        let rect = CGRect(
-            x: max((bounds.width - size.width) / 2 - 14, 12),
-            y: max(bounds.height - size.height - 54, 12),
-            width: size.width + 28,
-            height: size.height + 18
-        )
-        NSColor.black.withAlphaComponent(0.72).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 12, yRadius: 12).fill()
-        message.draw(at: CGPoint(x: rect.minX + 14, y: rect.minY + 9), withAttributes: attributes)
-    }
-}
-
 private enum ScreenCaptureServiceError: LocalizedError {
     case windowUnavailable
     case noSystemSelection
-    case displayUnavailable
 
     var errorDescription: String? {
         switch self {
         case .windowUnavailable:
             return "The selected capture window is no longer available. Choose it again and try once more."
         case .noSystemSelection:
-            return "Select a Fortnite screen area first."
-        case .displayUnavailable:
-            return "The display used by the saved capture area is no longer available. Select the Fortnite area again."
+            return "Select the Fortnite window first."
         }
     }
 }

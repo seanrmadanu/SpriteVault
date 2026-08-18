@@ -45,51 +45,93 @@ actor ScreenshotSpriteAnalyzer {
     /// "collection 85/117" from "scan coverage 96/117".
     func analyzeFrame(
         image screenshot: CGImage,
-        onProgress: @escaping @Sendable (Double, String) -> Void
+        onProgress: @escaping @Sendable (Double, String) -> Void,
+        onCollectionValidated: (@Sendable () -> Void)? = nil,
+        onCardsAligned: (@Sendable ([SpriteCardAnchor]) -> Void)? = nil
     ) async throws -> SpriteFrameAnalysis {
         try Task.checkCancellation()
         let viewport = contentViewport(in: screenshot)
 
-        // Calibrate the grid from what Fortnite is actually drawing instead of
-        // assuming a permanent 3x4 stencil. The level labels are excellent row
-        // anchors and move with the cards while scrolling.
-        onProgress(0.03, "Calibrating the visible Sprite cards…")
-        let headerConfirmed = try isCollectionScreen(screenshot, viewport: viewport)
-        let detail = try recognizedRightPanel(in: screenshot, viewport: viewport)
-        let grid = try recognizedGridLayout(in: screenshot, viewport: viewport)
-
-        let collectionConfirmed = headerConfirmed || detail != nil || grid.levelsBySlot.count >= 2
-        guard collectionConfirmed else {
-            onProgress(1.0, "Waiting for the Fortnite Sprites Collection screen…")
+        // Nothing is allowed to mutate collection data until both selected-tab
+        // treatments are visible: the highlighted SPRITES top-navigation tab
+        // and the yellow COLLECTION underline. Card text alone is not proof.
+        onProgress(0.03, "Checking the Fortnite Sprites tab…")
+        guard try isSpritesCollectionSelected(screenshot, viewport: viewport) else {
+            onProgress(1.0, "Please open Sprites → Collection…")
             return SpriteFrameAnalysis(
                 detections: [],
                 isCollectionScreen: false,
                 visibleSlots: 0,
                 inferredPageStart: nil,
+                coveredCatalogIndexes: [],
                 lockedSlots: [],
                 needsHelpSlots: [],
                 selectedSpriteName: nil,
                 cardAnchors: []
             )
         }
+        onCollectionValidated?()
+
+        // Calibrate only after the cheap page gate succeeds. This prevents
+        // expensive right-panel/grid OCR from running on unrelated windows.
+        onProgress(0.10, "Calibrating the visible Sprite cards…")
+        let grid = try recognizedGridLayout(in: screenshot, viewport: viewport)
+        let detail = try recognizedRightPanel(in: screenshot, viewport: viewport)
 
         let cardRects = grid.rects
-        var cards: [CardFeature] = []
+        var cardImages: [Int: CGImage] = [:]
         var selectionCandidates: [(slot: Int, score: Double)] = []
+        for (slot, rect) in cardRects.enumerated() {
+            guard let card = cropTopLeft(screenshot, to: rect) else { continue }
+            cardImages[slot] = card
+            selectionCandidates.append((slot, selectionScore(in: card)))
+        }
+
+        // Publish grounded geometry before artwork feature matching begins. The
+        // live overlay can animate processing dots on the current cards instead
+        // of showing no feedback until the expensive matching pass is finished.
+        let provisionalPageStart: Int? = {
+            guard let detail,
+                  let selectedSlot = bestSelectedSlot(selectionCandidates),
+                  let catalogIndex = catalog.firstIndex(where: {
+                      normalize($0.name) == normalize(detail.item.name)
+                  }) else { return nil }
+            let candidate = catalogIndex - selectedSlot
+            return candidate >= 0 ? candidate : nil
+        }()
+        let provisionalVisibleSlots = selectedVisibleSlots(
+            from: cardRects,
+            viewport: viewport,
+            pageStart: provisionalPageStart
+        )
+        if grid.isCalibrated {
+            let provisionalAnchors = cardRects.enumerated().compactMap { slot, rect in
+                guard provisionalVisibleSlots.contains(slot),
+                      let card = cardImages[slot] else { return nil }
+                return makeCardAnchor(slot: slot, rect: rect, card: card, image: screenshot)
+            }
+            if !provisionalAnchors.isEmpty {
+                onCardsAligned?(provisionalAnchors)
+            }
+        }
+
+        var cards: [CardFeature] = []
         var confidentLockedSlots = Set<Int>()
         var needsHelpSlots = Set<Int>()
         onProgress(0.16, grid.isCalibrated ? "Aligned to the visible Sprite rows…" : "Matching the visible Sprite cards…")
 
-        for (slot, rect) in cardRects.enumerated() {
+        for slot in cardRects.indices {
             try Task.checkCancellation()
-            guard let card = cropTopLeft(screenshot, to: rect) else { continue }
-            selectionCandidates.append((slot, selectionScore(in: card)))
+            guard let card = cardImages[slot] else { continue }
 
             let level = grid.levelsBySlot[slot]
             // Mastery is permanent state. Level 5 is enough to establish it,
             // but a crown keeps mastery true at Level 1-4 after a Sprite is lost.
             let mastered = (level == 5) || hasMasteryCrown(in: card)
             let visualScore = unlockedVisualScore(in: card)
+            let status: SpriteCollectionStatus = isVisuallyLost(in: card)
+                ? .lost
+                : .collected
 
             guard level != nil || mastered || visualScore >= 0.28 else {
                 if visualScore <= 0.10 {
@@ -106,7 +148,13 @@ actor ScreenshotSpriteAnalyzer {
                 continue
             }
 
-            cards.append(CardFeature(slot: slot, level: level, mastered: mastered, feature: feature))
+            cards.append(CardFeature(
+                slot: slot,
+                status: status,
+                level: level,
+                mastered: mastered,
+                feature: feature
+            ))
         }
 
         var detections: [DetectedSprite] = []
@@ -138,7 +186,7 @@ actor ScreenshotSpriteAnalyzer {
                 return DetectedSprite(
                     name: reference.item.name,
                     rarity: reference.item.rarity,
-                    status: .collected,
+                    status: card.status,
                     level: card.level,
                     mastered: card.mastered,
                     timestamp: 0,
@@ -190,17 +238,37 @@ actor ScreenshotSpriteAnalyzer {
         }
 
         let pageStart = inferredPageStart(from: unique)
-        let visibleSlots = cardRects.count
-        let identifiedSlots = Set(unique.compactMap(\.gridSlot))
-        let visibleSlotSet = Set(0..<visibleSlots)
+        let visibleSlotSet = selectedVisibleSlots(
+            from: cardRects,
+            viewport: viewport,
+            pageStart: pageStart
+        )
+        let displayedDetections = unique.filter { detection in
+            guard let slot = detection.gridSlot else { return true }
+            return visibleSlotSet.contains(slot)
+        }
+        let visibleSlots = visibleSlotSet.count
+        let identifiedSlots = Set(displayedDetections.compactMap(\.gridSlot))
         let unresolvedSlots = visibleSlotSet.subtracting(identifiedSlots)
         let lockedSlots = confidentLockedSlots.intersection(unresolvedSlots)
         needsHelpSlots.formUnion(unresolvedSlots.subtracting(lockedSlots))
+        needsHelpSlots.formIntersection(visibleSlotSet)
+
+        let coveredCatalogIndexes: Set<Int>
+        if let pageStart {
+            coveredCatalogIndexes = Set(visibleSlotSet.compactMap { slot in
+                let index = pageStart + slot
+                return catalog.indices.contains(index) ? index : nil
+            })
+        } else {
+            coveredCatalogIndexes = []
+        }
 
         let anchors: [SpriteCardAnchor]
         if grid.isCalibrated {
             anchors = cardRects.enumerated().compactMap { slot, rect in
-                guard let card = cropTopLeft(screenshot, to: rect) else { return nil }
+                guard visibleSlotSet.contains(slot) else { return nil }
+                guard let card = cardImages[slot] else { return nil }
                 return makeCardAnchor(slot: slot, rect: rect, card: card, image: screenshot)
             }
         } else {
@@ -209,19 +277,20 @@ actor ScreenshotSpriteAnalyzer {
             anchors = []
         }
 
-        if unique.isEmpty {
+        if displayedDetections.isEmpty {
             onProgress(1.0, grid.isCalibrated
                 ? "Cards aligned, but no unlocked Sprite details were readable yet."
                 : "Collection visible; waiting for enough card anchors to align the overlay.")
         } else {
-            onProgress(1.0, "Matched \(unique.count) unlocked Sprite\(unique.count == 1 ? "" : "s") in this stable view.")
+            onProgress(1.0, "Matched \(displayedDetections.count) unlocked Sprite\(displayedDetections.count == 1 ? "" : "s") in this stable view.")
         }
 
         return SpriteFrameAnalysis(
-            detections: unique,
+            detections: displayedDetections,
             isCollectionScreen: true,
             visibleSlots: visibleSlots,
             inferredPageStart: pageStart,
+            coveredCatalogIndexes: coveredCatalogIndexes,
             lockedSlots: lockedSlots,
             needsHelpSlots: needsHelpSlots,
             selectedSpriteName: selectedSpriteName,
@@ -243,6 +312,7 @@ actor ScreenshotSpriteAnalyzer {
         let level = grid.levelsBySlot[slot]
         let mastered = (level == 5) || hasMasteryCrown(in: card)
         guard level != nil || mastered || unlockedVisualScore(in: card) >= 0.16 else { return nil }
+        let status: SpriteCollectionStatus = isVisuallyLost(in: card) ? .lost : .collected
 
         let width = CGFloat(card.width)
         let height = CGFloat(card.height)
@@ -278,7 +348,7 @@ actor ScreenshotSpriteAnalyzer {
         return DetectedSprite(
             name: reference.item.name,
             rarity: reference.item.rarity,
-            status: .collected,
+            status: status,
             level: level,
             mastered: mastered,
             timestamp: 0,
@@ -318,7 +388,7 @@ actor ScreenshotSpriteAnalyzer {
         )
     }
 
-    private func isCollectionScreen(_ screenshot: CGImage, viewport: CGRect) throws -> Bool {
+    private func isSpritesCollectionSelected(_ screenshot: CGImage, viewport: CGRect) throws -> Bool {
         let headerRect = CGRect(
             x: viewport.minX + viewport.width * 0.03,
             y: viewport.minY + viewport.height * 0.045,
@@ -336,14 +406,82 @@ actor ScreenshotSpriteAnalyzer {
         let handler = VNImageRequestHandler(cgImage: header, options: [:])
         try handler.perform([request])
 
-        let text = (request.results ?? [])
-            .compactMap { $0.topCandidates(2).first?.string.uppercased() }
-            .joined(separator: " ")
-            .replacingOccurrences(of: "0", with: "O")
+        let observations = request.results ?? []
+        let recognized = observations.compactMap { observation -> (String, VNRecognizedTextObservation)? in
+            guard let candidate = observation.topCandidates(2).first else { return nil }
+            let text = candidate.string.uppercased().replacingOccurrences(of: "0", with: "O")
+            return (text, observation)
+        }
+        guard let spritesObservation = recognized.first(where: { $0.0.contains("SPRITES") })?.1,
+              let collectionObservation = recognized.first(where: { $0.0.contains("COLLECTION") })?.1 else {
+            return false
+        }
 
-        // Require both the top navigation tab and the Collection section. That
-        // keeps unrelated Fortnite menus from ever being allowed to mutate data.
-        return text.contains("SPRITES") && text.contains("COLLECTION")
+        // OCR proves the words exist, not that the tabs are selected. Derive
+        // the visual test rectangles from OCR coordinates so OBS title bars,
+        // letterboxing, and different window sizes cannot shift calibration.
+        let spritesText = topLeftRect(spritesObservation.boundingBox, in: header)
+        let collectionText = topLeftRect(collectionObservation.boundingBox, in: header)
+        let spritesTab = spritesText
+            .insetBy(dx: -spritesText.width * 0.42, dy: -spritesText.height * 0.62)
+            .intersection(CGRect(x: 0, y: 0, width: header.width, height: header.height))
+        let collectionUnderline = CGRect(
+            x: collectionText.minX - collectionText.width * 0.10,
+            y: collectionText.maxY + collectionText.height * 0.18,
+            width: collectionText.width * 1.20,
+            height: collectionText.height * 0.82
+        ).intersection(CGRect(x: 0, y: 0, width: header.width, height: header.height))
+
+        // These are intentionally conservative. OCR alone is not enough: both
+        // selected treatments must occupy a meaningful part of their OCR-driven
+        // regions before overlays or collection writes are allowed.
+        return paleSelectionRatio(in: header, rect: spritesTab) >= 0.20
+            && yellowSelectionRatio(in: header, rect: collectionUnderline) >= 0.08
+    }
+
+    private func topLeftRect(_ visionRect: CGRect, in image: CGImage) -> CGRect {
+        CGRect(
+            x: visionRect.minX * CGFloat(image.width),
+            y: (1 - visionRect.maxY) * CGFloat(image.height),
+            width: visionRect.width * CGFloat(image.width),
+            height: visionRect.height * CGFloat(image.height)
+        )
+    }
+
+    private func paleSelectionRatio(in image: CGImage, rect: CGRect) -> Double {
+        guard let crop = cropTopLeft(image, to: rect),
+              let pixels = downsampleRGBA(crop, width: 40, height: 20) else { return 0 }
+        var matches = 0
+        let count = 40 * 20
+        for index in 0..<count {
+            let offset = index * 4
+            let r = Int(pixels[offset])
+            let g = Int(pixels[offset + 1])
+            let b = Int(pixels[offset + 2])
+            let maximum = max(r, max(g, b))
+            let minimum = min(r, min(g, b))
+            if maximum >= 145, minimum >= 105, maximum - minimum <= 95 {
+                matches += 1
+            }
+        }
+        return Double(matches) / Double(count)
+    }
+
+    private func yellowSelectionRatio(in image: CGImage, rect: CGRect) -> Double {
+        guard let crop = cropTopLeft(image, to: rect),
+              let pixels = downsampleRGBA(crop, width: 48, height: 12) else { return 0 }
+        var matches = 0
+        let count = 48 * 12
+        for index in 0..<count {
+            let offset = index * 4
+            let r = Int(pixels[offset])
+            let g = Int(pixels[offset + 1])
+            let b = Int(pixels[offset + 2])
+            if r >= 175, g >= 145, b <= 125, r > b + 45, g > b + 25 {
+                matches += 1
+            }
+        }
+        return Double(matches) / Double(count)
     }
 
     private func recognizedRightPanel(in screenshot: CGImage, viewport: CGRect) throws -> DetailPanelMatch? {
@@ -546,6 +684,43 @@ actor ScreenshotSpriteAnalyzer {
         return GridLayout(rects: rects, levelsBySlot: levelsBySlot, isCalibrated: false)
     }
 
+    /// Fortnite exposes four complete rows at the absolute top and bottom of
+    /// the catalog. In the middle, clipped edge rows are ignored and only the
+    /// three rows nearest the viewport center receive overlays.
+    private func selectedVisibleSlots(
+        from rects: [CGRect],
+        viewport: CGRect,
+        pageStart: Int?
+    ) -> Set<Int> {
+        guard !rects.isEmpty else { return [] }
+        let rowCount = Int(ceil(Double(rects.count) / 3.0))
+        let rows = Array(0..<rowCount)
+        guard rowCount > 3 else { return Set(rects.indices) }
+
+        let isAtTop = pageStart == 0
+        let highestSlot = rects.indices.last ?? 0
+        let isAtBottom = pageStart.map { $0 + highestSlot >= catalog.count - 1 } ?? false
+
+        let selectedRows: [Int]
+        if isAtTop {
+            selectedRows = Array(rows.prefix(4))
+        } else if isAtBottom {
+            selectedRows = Array(rows.suffix(4))
+        } else {
+            selectedRows = Array(rows
+                .sorted { lhs, rhs in
+                    let leftRect = rects[min(lhs * 3, rects.count - 1)]
+                    let rightRect = rects[min(rhs * 3, rects.count - 1)]
+                    return abs(leftRect.midY - viewport.midY) < abs(rightRect.midY - viewport.midY)
+                }
+                .prefix(3))
+                .sorted()
+        }
+
+        let allowedRows = Set(selectedRows)
+        return Set(rects.indices.filter { allowedRows.contains($0 / 3) })
+    }
+
     private func nearestSlot(to point: CGPoint, in rects: [CGRect]) -> Int? {
         rects.enumerated().min { lhs, rhs in
             distanceSquared(point, CGPoint(x: lhs.element.midX, y: lhs.element.midY))
@@ -682,6 +857,39 @@ actor ScreenshotSpriteAnalyzer {
             }
         }
         return samples > 0 ? Double(visible) / Double(samples) : 0
+    }
+
+    /// Lost/equipped Sprites keep recognizable artwork but Fortnite removes
+    /// most of its color. Locked cards are darker silhouettes; the brightness
+    /// and contrast gates prevent those from being reported as summon-needed.
+    private func isVisuallyLost(in card: CGImage) -> Bool {
+        guard let artwork = artworkCrop(from: card),
+              let pixels = downsampleRGBA(artwork, width: 24, height: 24) else { return false }
+
+        var colored = 0
+        var luminanceTotal = 0.0
+        var luminances: [Double] = []
+        luminances.reserveCapacity(24 * 24)
+
+        for index in 0..<(24 * 24) {
+            let offset = index * 4
+            let r = Int(pixels[offset])
+            let g = Int(pixels[offset + 1])
+            let b = Int(pixels[offset + 2])
+            let maximum = max(r, max(g, b))
+            let minimum = min(r, min(g, b))
+            if maximum - minimum >= 30, maximum >= 70 { colored += 1 }
+            let luminance = Double(r * 30 + g * 59 + b * 11) / 100.0
+            luminanceTotal += luminance
+            luminances.append(luminance)
+        }
+
+        let count = Double(luminances.count)
+        guard count > 0 else { return false }
+        let mean = luminanceTotal / count
+        let variance = luminances.reduce(0.0) { $0 + pow($1 - mean, 2) } / count
+        let colorRatio = Double(colored) / count
+        return mean >= 52 && variance >= 420 && colorRatio <= 0.16
     }
 
     /// Fortnite keeps the mastery crown even when a previously mastered Sprite
@@ -1108,6 +1316,7 @@ private struct GridLayout {
 
 private struct CardFeature {
     let slot: Int
+    let status: SpriteCollectionStatus
     let level: Int?
     let mastered: Bool
     let feature: VNFeaturePrintObservation
