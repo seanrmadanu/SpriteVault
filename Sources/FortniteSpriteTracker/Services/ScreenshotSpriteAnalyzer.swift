@@ -105,11 +105,20 @@ actor ScreenshotSpriteAnalyzer {
             pageStart: provisionalPageStart
         )
         if grid.isCalibrated {
-            let provisionalAnchors = cardRects.enumerated().compactMap { slot, rect in
+            let provisionalAnchors: [SpriteCardAnchor] = cardRects.enumerated().compactMap { slot, rect -> SpriteCardAnchor? in
                 guard provisionalVisibleSlots.contains(slot),
-                      let card = cardImages[slot] else { return nil }
-                return makeCardAnchor(slot: slot, rect: rect, card: card, image: screenshot)
+                      let card = cardImages[slot] else {
+                    return nil
+                }
+
+                return makeCardAnchor(
+                    slot: slot,
+                    rect: rect,
+                    card: card,
+                    image: screenshot
+                )
             }
+
             if !provisionalAnchors.isEmpty {
                 onCardsAligned?(provisionalAnchors)
             }

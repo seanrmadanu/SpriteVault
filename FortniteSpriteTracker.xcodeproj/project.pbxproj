@@ -1,139 +1,179 @@
 // !$*UTF8*$!
 {
 	archiveVersion = 1;
-	classes = {};
+	classes = {
+	};
 	objectVersion = 56;
 	objects = {
 
 /* Begin PBXBuildFile section */
-		1F58F01CA02FF912F1B5ACE6 /* AnimatedBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1571E2851B03BEC782760D70 /* AnimatedBackground.swift */; };
-		4E67886F8A2F551F59878A87 /* CachedSpriteImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CC2859FB9347CAF1D0C12AF /* CachedSpriteImage.swift */; };
-		488B670AFC4F0CC442451646 /* LiveCaptureHeaderButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E16207C9559A1F99005C632 /* LiveCaptureHeaderButton.swift */; };
-		E248D9F704FD49B0135D4346 /* NativeSearchField.swift in Sources */ = {isa = PBXBuildFile; fileRef = C757255B89C01B4ECEB48649 /* NativeSearchField.swift */; };
-		95CFF0E37EA84AE98EC5331C /* ProgressPill.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAEA26E8A3BE8FFDBEEB3AA9 /* ProgressPill.swift */; };
-		0C67DEAD42C85D4B6370607D /* SpriteCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99C1AC7950BBBD2E5D575227 /* SpriteCard.swift */; };
-		03B878CEA69128FFCCE8FA28 /* SpriteCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 673D6ABFDD4B2AC5DA088E94 /* SpriteCatalog.swift */; };
-		60B0BBE843458C255B3AE08C /* SpriteDescriptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F5AF29A337F54E5F2B6AF08 /* SpriteDescriptions.swift */; };
-		9ECF65DEB2B333121DCEC6F6 /* FortniteSpriteTrackerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E042477FE8E9C1A428184A1 /* FortniteSpriteTrackerApp.swift */; };
+		03B878CEA69128FFCCE8FA28 /* Data/SpriteCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 673D6ABFDD4B2AC5DA088E94 /* Data/SpriteCatalog.swift */; };
+		0C67DEAD42C85D4B6370607D /* Components/SpriteCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99C1AC7950BBBD2E5D575227 /* Components/SpriteCard.swift */; };
+		0FC44EE57A5DBB142184464C /* Views/ProfileComparisonSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73C443AB6EB5384E63394E89 /* Views/ProfileComparisonSheet.swift */; };
+		1021BDBD39045945178D8ED6 /* Views/ActivityCenterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E961FAD37144A5EB26BAB579 /* Views/ActivityCenterView.swift */; };
+		1F58F01CA02FF912F1B5ACE6 /* Components/AnimatedBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1571E2851B03BEC782760D70 /* Components/AnimatedBackground.swift */; };
+		25B347D6131CB0D3E2CEC68E /* Models/CollectionProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B8AE5F2B49DE1CD18B9F2B8 /* Models/CollectionProfile.swift */; };
+		2C565EE7A2FE8A7473190D3A /* Models/SpriteItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBE1572C2E12E72EFFC835AF /* Models/SpriteItem.swift */; };
+		329191C615F327A01F32AD12 /* Views/ProfileEditorSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 448EE5DB68980FA6C696FA3A /* Views/ProfileEditorSheet.swift */; };
+		3A4F52867811A63D57427C6C /* Services/ResourceLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF29511C95D265C8407584D0 /* Services/ResourceLocator.swift */; };
+		3C24C4B46493C9783BDBE164 /* Services/VideoSpriteAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28E6798B72A3CC1056D2154D /* Services/VideoSpriteAnalyzer.swift */; };
+		3CFDAEF71F9EAD580EABAEC9 /* Services/LiveCaptureManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FEC0211057F9D4AE42A8575 /* Services/LiveCaptureManager.swift */; };
+		488B670AFC4F0CC442451646 /* Components/LiveCaptureHeaderButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E16207C9559A1F99005C632 /* Components/LiveCaptureHeaderButton.swift */; };
+		4E67886F8A2F551F59878A87 /* Components/CachedSpriteImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CC2859FB9347CAF1D0C12AF /* Components/CachedSpriteImage.swift */; };
+		51A053D220EE0D2D3354F44E /* Services/GlobalCaptureHotkey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D0D234A6C70579FC5BD8FAD /* Services/GlobalCaptureHotkey.swift */; };
+		5A26B63B831E66D8DD3A0280 /* Resources/SpriteImages in Resources */ = {isa = PBXBuildFile; fileRef = B8AEE5A6C86ACEE51CE88782 /* Resources/SpriteImages */; };
+		60B0BBE843458C255B3AE08C /* Data/SpriteDescriptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F5AF29A337F54E5F2B6AF08 /* Data/SpriteDescriptions.swift */; };
+		622C410E98148B51DD06993C /* Services/ScreenshotSpriteAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8BCCDF6058DEEA9D018C473 /* Services/ScreenshotSpriteAnalyzer.swift */; };
+		66005B651B1BE5E187574DDC /* Services/CollectionPDFExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48944EDB6802FE7D1A4E112A /* Services/CollectionPDFExporter.swift */; };
+		69A4EB3E6C278B4A14EFB8D8 /* Models/ActivityEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9851727BD323480FE92E9846 /* Models/ActivityEvent.swift */; };
+		7094BAFC4BF1701C747C3A17 /* Views/ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61030CB6FB0FD6891DF8C4BD /* Views/ContentView.swift */; };
+		7C0C8DC8A9D54986FAE67107 /* Services/AppNotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A64ABB750C7955F00682BA /* Services/AppNotificationService.swift */; };
 		7C1F24AD324FE1A455605B79 /* MacApplicationLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 913D0CFAE1C28D2E4168ED7F /* MacApplicationLifecycle.swift */; };
-		69A4EB3E6C278B4A14EFB8D8 /* ActivityEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9851727BD323480FE92E9846 /* ActivityEvent.swift */; };
-		829C7E8CA98D041AA00245A9 /* CaptureSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63D1BC3FE4CDF0746B7720D4 /* CaptureSource.swift */; };
-		9F652C7BD3502AFB2E4F2E06 /* CaptureWindowInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F5C130ED98AE6D08A03D926 /* CaptureWindowInfo.swift */; };
-		25B347D6131CB0D3E2CEC68E /* CollectionProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B8AE5F2B49DE1CD18B9F2B8 /* CollectionProfile.swift */; };
-		2C565EE7A2FE8A7473190D3A /* SpriteItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBE1572C2E12E72EFFC835AF /* SpriteItem.swift */; };
-		E8303B8F238C4851B200DBB1 /* ActivityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EF71A155A4F32A17AA79545 /* ActivityStore.swift */; };
-		7C0C8DC8A9D54986FAE67107 /* AppNotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A64ABB750C7955F00682BA /* AppNotificationService.swift */; };
-		66005B651B1BE5E187574DDC /* CollectionPDFExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48944EDB6802FE7D1A4E112A /* CollectionPDFExporter.swift */; };
-		51A053D220EE0D2D3354F44E /* GlobalCaptureHotkey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D0D234A6C70579FC5BD8FAD /* GlobalCaptureHotkey.swift */; };
-		3CFDAEF71F9EAD580EABAEC9 /* LiveCaptureManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FEC0211057F9D4AE42A8575 /* LiveCaptureManager.swift */; };
-		3A4F52867811A63D57427C6C /* ResourceLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF29511C95D265C8407584D0 /* ResourceLocator.swift */; };
-		96E05CA315B7852E61554129 /* ScreenCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51413C32762853D3543F422B /* ScreenCaptureService.swift */; };
-		622C410E98148B51DD06993C /* ScreenshotSpriteAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8BCCDF6058DEEA9D018C473 /* ScreenshotSpriteAnalyzer.swift */; };
-		E9D5B8A3483DB09400772AE4 /* SpriteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 171C744D23F00F1F425E17AD /* SpriteStore.swift */; };
-		7EB7C39E82480B71B8FA08F2 /* VideoCaptureDeviceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE319477EB234DE93918D27C /* VideoCaptureDeviceService.swift */; };
-		3C24C4B46493C9783BDBE164 /* VideoSpriteAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28E6798B72A3CC1056D2154D /* VideoSpriteAnalyzer.swift */; };
-		1021BDBD39045945178D8ED6 /* ActivityCenterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E961FAD37144A5EB26BAB579 /* ActivityCenterView.swift */; };
-		7094BAFC4BF1701C747C3A17 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61030CB6FB0FD6891DF8C4BD /* ContentView.swift */; };
-		8CE1A5F2DED5A3C4EAFA6AC5 /* LiveCaptureSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D6B59020AC23CC52FA37ED0 /* LiveCaptureSheet.swift */; };
-		0FC44EE57A5DBB142184464C /* ProfileComparisonSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73C443AB6EB5384E63394E89 /* ProfileComparisonSheet.swift */; };
-		329191C615F327A01F32AD12 /* ProfileEditorSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 448EE5DB68980FA6C696FA3A /* ProfileEditorSheet.swift */; };
-		DF7DC657B4765795184DC18E /* SpriteMenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77AA72DFD4BAFC6EEBADDCAF /* SpriteMenuBarView.swift */; };
-		915A1D51B542DF43E9192AFD /* VideoImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE73D86DA1A6D5B085924CA9 /* VideoImportSheet.swift */; };
-		5A26B63B831E66D8DD3A0280 /* SpriteImages in Resources */ = {isa = PBXBuildFile; fileRef = B8AEE5A6C86ACEE51CE88782 /* SpriteImages */; };
+		7EB7C39E82480B71B8FA08F2 /* Services/VideoCaptureDeviceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE319477EB234DE93918D27C /* Services/VideoCaptureDeviceService.swift */; };
+		829C7E8CA98D041AA00245A9 /* Models/CaptureSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63D1BC3FE4CDF0746B7720D4 /* Models/CaptureSource.swift */; };
+		8CE1A5F2DED5A3C4EAFA6AC5 /* Views/LiveCaptureSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D6B59020AC23CC52FA37ED0 /* Views/LiveCaptureSheet.swift */; };
+		915A1D51B542DF43E9192AFD /* Views/VideoImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE73D86DA1A6D5B085924CA9 /* Views/VideoImportSheet.swift */; };
+		95CFF0E37EA84AE98EC5331C /* Components/ProgressPill.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAEA26E8A3BE8FFDBEEB3AA9 /* Components/ProgressPill.swift */; };
+		96E05CA315B7852E61554129 /* Services/ScreenCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51413C32762853D3543F422B /* Services/ScreenCaptureService.swift */; };
+		9ECF65DEB2B333121DCEC6F6 /* FortniteSpriteTrackerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E042477FE8E9C1A428184A1 /* FortniteSpriteTrackerApp.swift */; };
+		9F652C7BD3502AFB2E4F2E06 /* Models/CaptureWindowInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F5C130ED98AE6D08A03D926 /* Models/CaptureWindowInfo.swift */; };
+		DF7DC657B4765795184DC18E /* Views/SpriteMenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77AA72DFD4BAFC6EEBADDCAF /* Views/SpriteMenuBarView.swift */; };
+		E248D9F704FD49B0135D4346 /* Components/NativeSearchField.swift in Sources */ = {isa = PBXBuildFile; fileRef = C757255B89C01B4ECEB48649 /* Components/NativeSearchField.swift */; };
+		E8303B8F238C4851B200DBB1 /* Services/ActivityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EF71A155A4F32A17AA79545 /* Services/ActivityStore.swift */; };
+		E9D5B8A3483DB09400772AE4 /* Services/SpriteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 171C744D23F00F1F425E17AD /* Services/SpriteStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		1571E2851B03BEC782760D70 /* AnimatedBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Components/AnimatedBackground.swift"; sourceTree = "<group>"; };
-		6CC2859FB9347CAF1D0C12AF /* CachedSpriteImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Components/CachedSpriteImage.swift"; sourceTree = "<group>"; };
-		3E16207C9559A1F99005C632 /* LiveCaptureHeaderButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Components/LiveCaptureHeaderButton.swift"; sourceTree = "<group>"; };
-		C757255B89C01B4ECEB48649 /* NativeSearchField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Components/NativeSearchField.swift"; sourceTree = "<group>"; };
-		DAEA26E8A3BE8FFDBEEB3AA9 /* ProgressPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Components/ProgressPill.swift"; sourceTree = "<group>"; };
-		99C1AC7950BBBD2E5D575227 /* SpriteCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Components/SpriteCard.swift"; sourceTree = "<group>"; };
-		673D6ABFDD4B2AC5DA088E94 /* SpriteCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Data/SpriteCatalog.swift"; sourceTree = "<group>"; };
-		3F5AF29A337F54E5F2B6AF08 /* SpriteDescriptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Data/SpriteDescriptions.swift"; sourceTree = "<group>"; };
-		6E042477FE8E9C1A428184A1 /* FortniteSpriteTrackerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FortniteSpriteTrackerApp.swift"; sourceTree = "<group>"; };
-		913D0CFAE1C28D2E4168ED7F /* MacApplicationLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MacApplicationLifecycle.swift"; sourceTree = "<group>"; };
-		9851727BD323480FE92E9846 /* ActivityEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/ActivityEvent.swift"; sourceTree = "<group>"; };
-		63D1BC3FE4CDF0746B7720D4 /* CaptureSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/CaptureSource.swift"; sourceTree = "<group>"; };
-		9F5C130ED98AE6D08A03D926 /* CaptureWindowInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/CaptureWindowInfo.swift"; sourceTree = "<group>"; };
-		9B8AE5F2B49DE1CD18B9F2B8 /* CollectionProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/CollectionProfile.swift"; sourceTree = "<group>"; };
-		BBE1572C2E12E72EFFC835AF /* SpriteItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/SpriteItem.swift"; sourceTree = "<group>"; };
-		8EF71A155A4F32A17AA79545 /* ActivityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/ActivityStore.swift"; sourceTree = "<group>"; };
-		C1A64ABB750C7955F00682BA /* AppNotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/AppNotificationService.swift"; sourceTree = "<group>"; };
-		48944EDB6802FE7D1A4E112A /* CollectionPDFExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/CollectionPDFExporter.swift"; sourceTree = "<group>"; };
-		0D0D234A6C70579FC5BD8FAD /* GlobalCaptureHotkey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/GlobalCaptureHotkey.swift"; sourceTree = "<group>"; };
-		0FEC0211057F9D4AE42A8575 /* LiveCaptureManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/LiveCaptureManager.swift"; sourceTree = "<group>"; };
-		DF29511C95D265C8407584D0 /* ResourceLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/ResourceLocator.swift"; sourceTree = "<group>"; };
-		51413C32762853D3543F422B /* ScreenCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/ScreenCaptureService.swift"; sourceTree = "<group>"; };
-		E8BCCDF6058DEEA9D018C473 /* ScreenshotSpriteAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/ScreenshotSpriteAnalyzer.swift"; sourceTree = "<group>"; };
-		171C744D23F00F1F425E17AD /* SpriteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/SpriteStore.swift"; sourceTree = "<group>"; };
-		EE319477EB234DE93918D27C /* VideoCaptureDeviceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/VideoCaptureDeviceService.swift"; sourceTree = "<group>"; };
-		28E6798B72A3CC1056D2154D /* VideoSpriteAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Services/VideoSpriteAnalyzer.swift"; sourceTree = "<group>"; };
-		E961FAD37144A5EB26BAB579 /* ActivityCenterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/ActivityCenterView.swift"; sourceTree = "<group>"; };
-		61030CB6FB0FD6891DF8C4BD /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/ContentView.swift"; sourceTree = "<group>"; };
-		7D6B59020AC23CC52FA37ED0 /* LiveCaptureSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/LiveCaptureSheet.swift"; sourceTree = "<group>"; };
-		73C443AB6EB5384E63394E89 /* ProfileComparisonSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/ProfileComparisonSheet.swift"; sourceTree = "<group>"; };
-		448EE5DB68980FA6C696FA3A /* ProfileEditorSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/ProfileEditorSheet.swift"; sourceTree = "<group>"; };
-		77AA72DFD4BAFC6EEBADDCAF /* SpriteMenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/SpriteMenuBarView.swift"; sourceTree = "<group>"; };
-		DE73D86DA1A6D5B085924CA9 /* VideoImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/VideoImportSheet.swift"; sourceTree = "<group>"; };
 		0A593968914150412A496B0F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		B8AEE5A6C86ACEE51CE88782 /* SpriteImages */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/SpriteImages; sourceTree = "<group>"; };
+		0D0D234A6C70579FC5BD8FAD /* Services/GlobalCaptureHotkey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/GlobalCaptureHotkey.swift; sourceTree = "<group>"; };
+		0FEC0211057F9D4AE42A8575 /* Services/LiveCaptureManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/LiveCaptureManager.swift; sourceTree = "<group>"; };
+		1571E2851B03BEC782760D70 /* Components/AnimatedBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/AnimatedBackground.swift; sourceTree = "<group>"; };
+		171C744D23F00F1F425E17AD /* Services/SpriteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/SpriteStore.swift; sourceTree = "<group>"; };
+		28E6798B72A3CC1056D2154D /* Services/VideoSpriteAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/VideoSpriteAnalyzer.swift; sourceTree = "<group>"; };
+		3E16207C9559A1F99005C632 /* Components/LiveCaptureHeaderButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/LiveCaptureHeaderButton.swift; sourceTree = "<group>"; };
+		3F5AF29A337F54E5F2B6AF08 /* Data/SpriteDescriptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Data/SpriteDescriptions.swift; sourceTree = "<group>"; };
+		448EE5DB68980FA6C696FA3A /* Views/ProfileEditorSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ProfileEditorSheet.swift; sourceTree = "<group>"; };
+		48944EDB6802FE7D1A4E112A /* Services/CollectionPDFExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/CollectionPDFExporter.swift; sourceTree = "<group>"; };
+		51413C32762853D3543F422B /* Services/ScreenCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/ScreenCaptureService.swift; sourceTree = "<group>"; };
+		61030CB6FB0FD6891DF8C4BD /* Views/ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ContentView.swift; sourceTree = "<group>"; };
+		63D1BC3FE4CDF0746B7720D4 /* Models/CaptureSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/CaptureSource.swift; sourceTree = "<group>"; };
+		673D6ABFDD4B2AC5DA088E94 /* Data/SpriteCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Data/SpriteCatalog.swift; sourceTree = "<group>"; };
+		6CC2859FB9347CAF1D0C12AF /* Components/CachedSpriteImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/CachedSpriteImage.swift; sourceTree = "<group>"; };
+		6E042477FE8E9C1A428184A1 /* FortniteSpriteTrackerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FortniteSpriteTrackerApp.swift; sourceTree = "<group>"; };
+		73C443AB6EB5384E63394E89 /* Views/ProfileComparisonSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ProfileComparisonSheet.swift; sourceTree = "<group>"; };
+		77AA72DFD4BAFC6EEBADDCAF /* Views/SpriteMenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SpriteMenuBarView.swift; sourceTree = "<group>"; };
+		7D6B59020AC23CC52FA37ED0 /* Views/LiveCaptureSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/LiveCaptureSheet.swift; sourceTree = "<group>"; };
+		8EF71A155A4F32A17AA79545 /* Services/ActivityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/ActivityStore.swift; sourceTree = "<group>"; };
+		913D0CFAE1C28D2E4168ED7F /* MacApplicationLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacApplicationLifecycle.swift; sourceTree = "<group>"; };
+		9851727BD323480FE92E9846 /* Models/ActivityEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/ActivityEvent.swift; sourceTree = "<group>"; };
+		99C1AC7950BBBD2E5D575227 /* Components/SpriteCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/SpriteCard.swift; sourceTree = "<group>"; };
+		9B8AE5F2B49DE1CD18B9F2B8 /* Models/CollectionProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/CollectionProfile.swift; sourceTree = "<group>"; };
+		9F5C130ED98AE6D08A03D926 /* Models/CaptureWindowInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/CaptureWindowInfo.swift; sourceTree = "<group>"; };
 		B3A90F3B043A6A55BCAE442F /* Sprite Vault.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Sprite Vault.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		B8AEE5A6C86ACEE51CE88782 /* Resources/SpriteImages */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/SpriteImages; sourceTree = "<group>"; };
+		BBE1572C2E12E72EFFC835AF /* Models/SpriteItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/SpriteItem.swift; sourceTree = "<group>"; };
+		C1A64ABB750C7955F00682BA /* Services/AppNotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AppNotificationService.swift; sourceTree = "<group>"; };
+		C757255B89C01B4ECEB48649 /* Components/NativeSearchField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/NativeSearchField.swift; sourceTree = "<group>"; };
+		DAEA26E8A3BE8FFDBEEB3AA9 /* Components/ProgressPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/ProgressPill.swift; sourceTree = "<group>"; };
+		DE73D86DA1A6D5B085924CA9 /* Views/VideoImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/VideoImportSheet.swift; sourceTree = "<group>"; };
+		DF29511C95D265C8407584D0 /* Services/ResourceLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/ResourceLocator.swift; sourceTree = "<group>"; };
+		E8BCCDF6058DEEA9D018C473 /* Services/ScreenshotSpriteAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/ScreenshotSpriteAnalyzer.swift; sourceTree = "<group>"; };
+		E961FAD37144A5EB26BAB579 /* Views/ActivityCenterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ActivityCenterView.swift; sourceTree = "<group>"; };
+		EE319477EB234DE93918D27C /* Services/VideoCaptureDeviceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/VideoCaptureDeviceService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		916FE461C2B95638B7A42CC2 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		916FE461C2B95638B7A42CC2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		E53BD586C5B50D85DEF938EE = {isa = PBXGroup; children = (9BAF64C664603FF7F390F8DB /* Sources */, DA5AA67557A1BD41B06376F1 /* Supporting */, 7109A8AA5E71A45BA03246BA /* Products */); sourceTree = "<group>"; };
-		9BAF64C664603FF7F390F8DB /* Sources */ = {isa = PBXGroup; path = Sources/FortniteSpriteTracker; sourceTree = "<group>"; children = (
-			1571E2851B03BEC782760D70 /* AnimatedBackground.swift */,
-			6CC2859FB9347CAF1D0C12AF /* CachedSpriteImage.swift */,
-			3E16207C9559A1F99005C632 /* LiveCaptureHeaderButton.swift */,
-			C757255B89C01B4ECEB48649 /* NativeSearchField.swift */,
-			DAEA26E8A3BE8FFDBEEB3AA9 /* ProgressPill.swift */,
-			99C1AC7950BBBD2E5D575227 /* SpriteCard.swift */,
-			673D6ABFDD4B2AC5DA088E94 /* SpriteCatalog.swift */,
-			3F5AF29A337F54E5F2B6AF08 /* SpriteDescriptions.swift */,
-			6E042477FE8E9C1A428184A1 /* FortniteSpriteTrackerApp.swift */,
-			913D0CFAE1C28D2E4168ED7F /* MacApplicationLifecycle.swift */,
-			9851727BD323480FE92E9846 /* ActivityEvent.swift */,
-			63D1BC3FE4CDF0746B7720D4 /* CaptureSource.swift */,
-			9F5C130ED98AE6D08A03D926 /* CaptureWindowInfo.swift */,
-			9B8AE5F2B49DE1CD18B9F2B8 /* CollectionProfile.swift */,
-			BBE1572C2E12E72EFFC835AF /* SpriteItem.swift */,
-			8EF71A155A4F32A17AA79545 /* ActivityStore.swift */,
-			C1A64ABB750C7955F00682BA /* AppNotificationService.swift */,
-			48944EDB6802FE7D1A4E112A /* CollectionPDFExporter.swift */,
-			0D0D234A6C70579FC5BD8FAD /* GlobalCaptureHotkey.swift */,
-			0FEC0211057F9D4AE42A8575 /* LiveCaptureManager.swift */,
-			DF29511C95D265C8407584D0 /* ResourceLocator.swift */,
-			51413C32762853D3543F422B /* ScreenCaptureService.swift */,
-			E8BCCDF6058DEEA9D018C473 /* ScreenshotSpriteAnalyzer.swift */,
-			171C744D23F00F1F425E17AD /* SpriteStore.swift */,
-			EE319477EB234DE93918D27C /* VideoCaptureDeviceService.swift */,
-			28E6798B72A3CC1056D2154D /* VideoSpriteAnalyzer.swift */,
-			E961FAD37144A5EB26BAB579 /* ActivityCenterView.swift */,
-			61030CB6FB0FD6891DF8C4BD /* ContentView.swift */,
-			7D6B59020AC23CC52FA37ED0 /* LiveCaptureSheet.swift */,
-			73C443AB6EB5384E63394E89 /* ProfileComparisonSheet.swift */,
-			448EE5DB68980FA6C696FA3A /* ProfileEditorSheet.swift */,
-			77AA72DFD4BAFC6EEBADDCAF /* SpriteMenuBarView.swift */,
-			DE73D86DA1A6D5B085924CA9 /* VideoImportSheet.swift */,
-			B8AEE5A6C86ACEE51CE88782 /* SpriteImages */,
-		); };
-		DA5AA67557A1BD41B06376F1 /* Supporting */ = {isa = PBXGroup; path = Supporting; sourceTree = "<group>"; children = (0A593968914150412A496B0F /* Info.plist */); };
-		7109A8AA5E71A45BA03246BA /* Products */ = {isa = PBXGroup; name = Products; sourceTree = "<group>"; children = (B3A90F3B043A6A55BCAE442F /* Sprite Vault.app */); };
+		7109A8AA5E71A45BA03246BA /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B3A90F3B043A6A55BCAE442F /* Sprite Vault.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		9BAF64C664603FF7F390F8DB /* Sources/FortniteSpriteTracker */ = {
+			isa = PBXGroup;
+			children = (
+				1571E2851B03BEC782760D70 /* Components/AnimatedBackground.swift */,
+				6CC2859FB9347CAF1D0C12AF /* Components/CachedSpriteImage.swift */,
+				3E16207C9559A1F99005C632 /* Components/LiveCaptureHeaderButton.swift */,
+				C757255B89C01B4ECEB48649 /* Components/NativeSearchField.swift */,
+				DAEA26E8A3BE8FFDBEEB3AA9 /* Components/ProgressPill.swift */,
+				99C1AC7950BBBD2E5D575227 /* Components/SpriteCard.swift */,
+				673D6ABFDD4B2AC5DA088E94 /* Data/SpriteCatalog.swift */,
+				3F5AF29A337F54E5F2B6AF08 /* Data/SpriteDescriptions.swift */,
+				6E042477FE8E9C1A428184A1 /* FortniteSpriteTrackerApp.swift */,
+				913D0CFAE1C28D2E4168ED7F /* MacApplicationLifecycle.swift */,
+				9851727BD323480FE92E9846 /* Models/ActivityEvent.swift */,
+				63D1BC3FE4CDF0746B7720D4 /* Models/CaptureSource.swift */,
+				9F5C130ED98AE6D08A03D926 /* Models/CaptureWindowInfo.swift */,
+				9B8AE5F2B49DE1CD18B9F2B8 /* Models/CollectionProfile.swift */,
+				BBE1572C2E12E72EFFC835AF /* Models/SpriteItem.swift */,
+				8EF71A155A4F32A17AA79545 /* Services/ActivityStore.swift */,
+				C1A64ABB750C7955F00682BA /* Services/AppNotificationService.swift */,
+				48944EDB6802FE7D1A4E112A /* Services/CollectionPDFExporter.swift */,
+				0D0D234A6C70579FC5BD8FAD /* Services/GlobalCaptureHotkey.swift */,
+				0FEC0211057F9D4AE42A8575 /* Services/LiveCaptureManager.swift */,
+				DF29511C95D265C8407584D0 /* Services/ResourceLocator.swift */,
+				51413C32762853D3543F422B /* Services/ScreenCaptureService.swift */,
+				E8BCCDF6058DEEA9D018C473 /* Services/ScreenshotSpriteAnalyzer.swift */,
+				171C744D23F00F1F425E17AD /* Services/SpriteStore.swift */,
+				EE319477EB234DE93918D27C /* Services/VideoCaptureDeviceService.swift */,
+				28E6798B72A3CC1056D2154D /* Services/VideoSpriteAnalyzer.swift */,
+				E961FAD37144A5EB26BAB579 /* Views/ActivityCenterView.swift */,
+				61030CB6FB0FD6891DF8C4BD /* Views/ContentView.swift */,
+				7D6B59020AC23CC52FA37ED0 /* Views/LiveCaptureSheet.swift */,
+				73C443AB6EB5384E63394E89 /* Views/ProfileComparisonSheet.swift */,
+				448EE5DB68980FA6C696FA3A /* Views/ProfileEditorSheet.swift */,
+				77AA72DFD4BAFC6EEBADDCAF /* Views/SpriteMenuBarView.swift */,
+				DE73D86DA1A6D5B085924CA9 /* Views/VideoImportSheet.swift */,
+				B8AEE5A6C86ACEE51CE88782 /* Resources/SpriteImages */,
+			);
+			path = Sources/FortniteSpriteTracker;
+			sourceTree = "<group>";
+		};
+		DA5AA67557A1BD41B06376F1 /* Supporting */ = {
+			isa = PBXGroup;
+			children = (
+				0A593968914150412A496B0F /* Info.plist */,
+			);
+			path = Supporting;
+			sourceTree = "<group>";
+		};
+		E53BD586C5B50D85DEF938EE = {
+			isa = PBXGroup;
+			children = (
+				9BAF64C664603FF7F390F8DB /* Sources/FortniteSpriteTracker */,
+				DA5AA67557A1BD41B06376F1 /* Supporting */,
+				7109A8AA5E71A45BA03246BA /* Products */,
+			);
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
 		7C37AFB5BCCB206A9524919E /* SpriteVault */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = C62250499A1E24F5B2E33309 /* Build configuration list for PBXNativeTarget "SpriteVault" */;
-			buildPhases = (004FC17E120F460F7E75F20D /* Sources */, 916FE461C2B95638B7A42CC2 /* Frameworks */, 1364F594738BE478F8926C0A /* Resources */);
-			buildRules = ();
-			dependencies = ();
+			buildPhases = (
+				004FC17E120F460F7E75F20D /* Sources */,
+				916FE461C2B95638B7A42CC2 /* Frameworks */,
+				1364F594738BE478F8926C0A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
 			name = SpriteVault;
 			productName = "Sprite Vault";
 			productReference = B3A90F3B043A6A55BCAE442F /* Sprite Vault.app */;
@@ -144,66 +184,163 @@
 /* Begin PBXProject section */
 		060E09AB2CA4CBDD17467A9B /* Project object */ = {
 			isa = PBXProject;
-			attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 1600; LastUpgradeCheck = 1600; TargetAttributes = {
-				7C37AFB5BCCB206A9524919E = {CreatedOnToolsVersion = 16.0; };
-			}; };
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					7C37AFB5BCCB206A9524919E = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
 			buildConfigurationList = F6BEDB83056162EE5570CAAF /* Build configuration list for PBXProject "FortniteSpriteTracker" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
-			knownRegions = (en, Base);
+			knownRegions = (
+				en,
+				Base,
+			);
 			mainGroup = E53BD586C5B50D85DEF938EE;
 			productRefGroup = 7109A8AA5E71A45BA03246BA /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = (7C37AFB5BCCB206A9524919E /* SpriteVault */);
+			targets = (
+				7C37AFB5BCCB206A9524919E /* SpriteVault */,
+			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		1364F594738BE478F8926C0A /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (5A26B63B831E66D8DD3A0280 /* SpriteImages in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+		1364F594738BE478F8926C0A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5A26B63B831E66D8DD3A0280 /* Resources/SpriteImages in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		004FC17E120F460F7E75F20D /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (
-			1F58F01CA02FF912F1B5ACE6 /* AnimatedBackground.swift in Sources */,
-			4E67886F8A2F551F59878A87 /* CachedSpriteImage.swift in Sources */,
-			488B670AFC4F0CC442451646 /* LiveCaptureHeaderButton.swift in Sources */,
-			E248D9F704FD49B0135D4346 /* NativeSearchField.swift in Sources */,
-			95CFF0E37EA84AE98EC5331C /* ProgressPill.swift in Sources */,
-			0C67DEAD42C85D4B6370607D /* SpriteCard.swift in Sources */,
-			03B878CEA69128FFCCE8FA28 /* SpriteCatalog.swift in Sources */,
-			60B0BBE843458C255B3AE08C /* SpriteDescriptions.swift in Sources */,
-			9ECF65DEB2B333121DCEC6F6 /* FortniteSpriteTrackerApp.swift in Sources */,
-			7C1F24AD324FE1A455605B79 /* MacApplicationLifecycle.swift in Sources */,
-			69A4EB3E6C278B4A14EFB8D8 /* ActivityEvent.swift in Sources */,
-			829C7E8CA98D041AA00245A9 /* CaptureSource.swift in Sources */,
-			9F652C7BD3502AFB2E4F2E06 /* CaptureWindowInfo.swift in Sources */,
-			25B347D6131CB0D3E2CEC68E /* CollectionProfile.swift in Sources */,
-			2C565EE7A2FE8A7473190D3A /* SpriteItem.swift in Sources */,
-			E8303B8F238C4851B200DBB1 /* ActivityStore.swift in Sources */,
-			7C0C8DC8A9D54986FAE67107 /* AppNotificationService.swift in Sources */,
-			66005B651B1BE5E187574DDC /* CollectionPDFExporter.swift in Sources */,
-			51A053D220EE0D2D3354F44E /* GlobalCaptureHotkey.swift in Sources */,
-			3CFDAEF71F9EAD580EABAEC9 /* LiveCaptureManager.swift in Sources */,
-			3A4F52867811A63D57427C6C /* ResourceLocator.swift in Sources */,
-			96E05CA315B7852E61554129 /* ScreenCaptureService.swift in Sources */,
-			622C410E98148B51DD06993C /* ScreenshotSpriteAnalyzer.swift in Sources */,
-			E9D5B8A3483DB09400772AE4 /* SpriteStore.swift in Sources */,
-			7EB7C39E82480B71B8FA08F2 /* VideoCaptureDeviceService.swift in Sources */,
-			3C24C4B46493C9783BDBE164 /* VideoSpriteAnalyzer.swift in Sources */,
-			1021BDBD39045945178D8ED6 /* ActivityCenterView.swift in Sources */,
-			7094BAFC4BF1701C747C3A17 /* ContentView.swift in Sources */,
-			8CE1A5F2DED5A3C4EAFA6AC5 /* LiveCaptureSheet.swift in Sources */,
-			0FC44EE57A5DBB142184464C /* ProfileComparisonSheet.swift in Sources */,
-			329191C615F327A01F32AD12 /* ProfileEditorSheet.swift in Sources */,
-			DF7DC657B4765795184DC18E /* SpriteMenuBarView.swift in Sources */,
-			915A1D51B542DF43E9192AFD /* VideoImportSheet.swift in Sources */,
-		); runOnlyForDeploymentPostprocessing = 0; };
+		004FC17E120F460F7E75F20D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1F58F01CA02FF912F1B5ACE6 /* Components/AnimatedBackground.swift in Sources */,
+				4E67886F8A2F551F59878A87 /* Components/CachedSpriteImage.swift in Sources */,
+				488B670AFC4F0CC442451646 /* Components/LiveCaptureHeaderButton.swift in Sources */,
+				E248D9F704FD49B0135D4346 /* Components/NativeSearchField.swift in Sources */,
+				95CFF0E37EA84AE98EC5331C /* Components/ProgressPill.swift in Sources */,
+				0C67DEAD42C85D4B6370607D /* Components/SpriteCard.swift in Sources */,
+				03B878CEA69128FFCCE8FA28 /* Data/SpriteCatalog.swift in Sources */,
+				60B0BBE843458C255B3AE08C /* Data/SpriteDescriptions.swift in Sources */,
+				9ECF65DEB2B333121DCEC6F6 /* FortniteSpriteTrackerApp.swift in Sources */,
+				7C1F24AD324FE1A455605B79 /* MacApplicationLifecycle.swift in Sources */,
+				69A4EB3E6C278B4A14EFB8D8 /* Models/ActivityEvent.swift in Sources */,
+				829C7E8CA98D041AA00245A9 /* Models/CaptureSource.swift in Sources */,
+				9F652C7BD3502AFB2E4F2E06 /* Models/CaptureWindowInfo.swift in Sources */,
+				25B347D6131CB0D3E2CEC68E /* Models/CollectionProfile.swift in Sources */,
+				2C565EE7A2FE8A7473190D3A /* Models/SpriteItem.swift in Sources */,
+				E8303B8F238C4851B200DBB1 /* Services/ActivityStore.swift in Sources */,
+				7C0C8DC8A9D54986FAE67107 /* Services/AppNotificationService.swift in Sources */,
+				66005B651B1BE5E187574DDC /* Services/CollectionPDFExporter.swift in Sources */,
+				51A053D220EE0D2D3354F44E /* Services/GlobalCaptureHotkey.swift in Sources */,
+				3CFDAEF71F9EAD580EABAEC9 /* Services/LiveCaptureManager.swift in Sources */,
+				3A4F52867811A63D57427C6C /* Services/ResourceLocator.swift in Sources */,
+				96E05CA315B7852E61554129 /* Services/ScreenCaptureService.swift in Sources */,
+				622C410E98148B51DD06993C /* Services/ScreenshotSpriteAnalyzer.swift in Sources */,
+				E9D5B8A3483DB09400772AE4 /* Services/SpriteStore.swift in Sources */,
+				7EB7C39E82480B71B8FA08F2 /* Services/VideoCaptureDeviceService.swift in Sources */,
+				3C24C4B46493C9783BDBE164 /* Services/VideoSpriteAnalyzer.swift in Sources */,
+				1021BDBD39045945178D8ED6 /* Views/ActivityCenterView.swift in Sources */,
+				7094BAFC4BF1701C747C3A17 /* Views/ContentView.swift in Sources */,
+				8CE1A5F2DED5A3C4EAFA6AC5 /* Views/LiveCaptureSheet.swift in Sources */,
+				0FC44EE57A5DBB142184464C /* Views/ProfileComparisonSheet.swift in Sources */,
+				329191C615F327A01F32AD12 /* Views/ProfileEditorSheet.swift in Sources */,
+				DF7DC657B4765795184DC18E /* Views/SpriteMenuBarView.swift in Sources */,
+				915A1D51B542DF43E9192AFD /* Views/VideoImportSheet.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
-		D4E4076CDA28EF80D1577E6B /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+		4BACFD0FE0B396691CBC204B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		58A7031AEBDA69223AD2B5BC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_ENTITLEMENTS = Supporting/SpriteVault.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = M955JC8G35;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Supporting/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.spritevault.FortniteSpriteTracker;
+				PRODUCT_NAME = "Sprite Vault";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		5915A5333AD100397C5D3DBF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_ENTITLEMENTS = Supporting/SpriteVault.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = M955JC8G35;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Supporting/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.spritevault.FortniteSpriteTracker;
+				PRODUCT_NAME = "Sprite Vault";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		D4E4076CDA28EF80D1577E6B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
@@ -214,62 +351,31 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
-				SWIFT_OPTIMIZATION_LEVEL = -Onone;
-			}; name = Debug; };
-		4BACFD0FE0B396691CBC204B /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
-				ALWAYS_SEARCH_USER_PATHS = NO;
-				CLANG_ENABLE_MODULES = YES;
-				CLANG_ENABLE_OBJC_ARC = YES;
-				COPY_PHASE_STRIP = YES;
-				DEBUG_INFORMATION_FORMAT = dwarf-with-dsym;
-				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				GCC_C_LANGUAGE_STANDARD = gnu17;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				SDKROOT = macosx;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)";
-				SWIFT_OPTIMIZATION_LEVEL = -O;
-			}; name = Release; };
-		5915A5333AD100397C5D3DBF /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
-				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
-				CODE_SIGN_ENTITLEMENTS = Supporting/SpriteVault.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = NO;
-				ENABLE_HARDENED_RUNTIME = YES;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = Supporting/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.spritevault.FortniteSpriteTracker;
-				PRODUCT_NAME = "Sprite Vault";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-			}; name = Debug; };
-		58A7031AEBDA69223AD2B5BC /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
-				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
-				CODE_SIGN_ENTITLEMENTS = Supporting/SpriteVault.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = NO;
-				ENABLE_HARDENED_RUNTIME = YES;
-				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = Supporting/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.spritevault.FortniteSpriteTracker;
-				PRODUCT_NAME = "Sprite Vault";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-			}; name = Release; };
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		F6BEDB83056162EE5570CAAF /* Build configuration list for PBXProject "FortniteSpriteTracker" */ = {isa = XCConfigurationList; buildConfigurations = (D4E4076CDA28EF80D1577E6B /* Debug */, 4BACFD0FE0B396691CBC204B /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		C62250499A1E24F5B2E33309 /* Build configuration list for PBXNativeTarget "SpriteVault" */ = {isa = XCConfigurationList; buildConfigurations = (5915A5333AD100397C5D3DBF /* Debug */, 58A7031AEBDA69223AD2B5BC /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		C62250499A1E24F5B2E33309 /* Build configuration list for PBXNativeTarget "SpriteVault" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5915A5333AD100397C5D3DBF /* Debug */,
+				58A7031AEBDA69223AD2B5BC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F6BEDB83056162EE5570CAAF /* Build configuration list for PBXProject "FortniteSpriteTracker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D4E4076CDA28EF80D1577E6B /* Debug */,
+				4BACFD0FE0B396691CBC204B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 	};
 	rootObject = 060E09AB2CA4CBDD17467A9B /* Project object */;
