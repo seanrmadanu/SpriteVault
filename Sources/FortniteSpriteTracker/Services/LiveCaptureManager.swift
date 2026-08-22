@@ -112,7 +112,13 @@ final class LiveCaptureManager: ObservableObject {
     private let requiredAgreementFrames = 2
     private var lastProgressNotificationAt: Date?
     private let progressNotificationInterval: TimeInterval = 45
-    private let groupedNotificationThreshold = 4
+    /// Collection changes waiting to be announced as a single banner.
+    private var pendingNewNames: [String] = []
+    private var pendingLevelNames: [String] = []
+    private var pendingMasteredNames: [String] = []
+    private var pendingLostNames: [String] = []
+    private var collectionUpdateFlushTask: Task<Void, Never>?
+    private let collectionUpdateQuietPeriod: TimeInterval = 6
     private var shouldFinishAfterApply = false
     private var newNames = Set<String>()
     private var levelUpNames = Set<String>()
@@ -676,87 +682,99 @@ final class LiveCaptureManager: ObservableObject {
         for change in summary.lostSprites { lostNames.insert(change.name) }
         refreshChangeCounters()
 
-        // 6.2 — a first scan used to be completely silent until it finished.
-        // Keep the per-Sprite banners suppressed, but send an occasional
-        // progress summary so the user knows it is working.
-        if sessionInitialOwnedCount == 0 {
-            for change in summary.newSprites {
-                let levelText = change.newLevel.map { "Lvl \($0)" } ?? "Unlocked"
-                let body = "\(change.name) · \(levelText)\(change.becameMastered ? " · Mastered 👑" : "")"
-                addSpriteActivity(kind: .newSprite, title: "New Sprite added", message: body, change: change)
-            }
-            sendFirstScanProgressIfDue()
+        // The Activity Center keeps one entry per Sprite — that is a log, and
+        // detail is useful there. System banners are not a log: collapse a whole
+        // batch into a single notification so a scan cannot produce a stack of
+        // them. Scan lifecycle messages stay separate; they are about the app,
+        // not the collection.
+        for change in summary.newSprites {
+            let levelText = change.newLevel.map { "Lvl \($0)" } ?? "Unlocked"
+            let body = "\(change.name) · \(levelText)\(change.becameMastered ? " · Mastered 👑" : "")"
+            addSpriteActivity(kind: .newSprite, title: "New Sprite added", message: body, change: change)
+        }
+        for change in summary.masteredSprites {
+            addSpriteActivity(kind: .mastered, title: "Sprite mastered 👑", message: "\(change.name) has the mastery crown.", change: change)
+        }
+        for change in summary.levelUps {
+            let oldLevel = change.previousLevel ?? 0
+            let newLevel = change.newLevel ?? oldLevel
+            addSpriteActivity(kind: .levelUp, title: "Sprite leveled up", message: "\(change.name) · Lvl \(oldLevel) → Lvl \(newLevel)", change: change)
+        }
+        for change in summary.lostSprites {
+            addSpriteActivity(kind: .lost, title: "Sprite lost in past match", message: "\(change.name) is greyed out in Fortnite but remains in your unlocked collection.", change: change)
         }
 
-        // Initial profile syncs get one detailed completion entry instead of a
-        // wall of system banners. Subsequent scans produce clickable alerts.
-        if sessionInitialOwnedCount > 0 {
-            // 6.3 — 40 new Sprites must not become 40 banners.
-            if summary.newSprites.count > groupedNotificationThreshold {
-                let names = summary.newSprites.prefix(3).map(\.name).joined(separator: ", ")
-                let extra = summary.newSprites.count - 3
-                for change in summary.newSprites {
-                    let levelText = change.newLevel.map { "Lvl \($0)" } ?? "Unlocked"
-                    let body = "\(change.name) · \(levelText)\(change.becameMastered ? " · Mastered 👑" : "")"
-                    addSpriteActivity(kind: .newSprite, title: "New Sprite added", message: body, change: change)
-                }
-                notificationService.send(
-                    title: "\(summary.newSprites.count) New Sprites Added",
-                    body: extra > 0 ? "\(names) and \(extra) more." : names,
-                    identifier: "sprite-new-batch-\(UUID().uuidString)",
-                    spriteName: nil
-                )
-            } else {
-                for change in summary.newSprites {
-                    let levelText = change.newLevel.map { "Lvl \($0)" } ?? "Unlocked"
-                    let body = "\(change.name) · \(levelText)\(change.becameMastered ? " · Mastered 👑" : "")"
-                    addSpriteActivity(kind: .newSprite, title: "New Sprite added", message: body, change: change)
-                    notificationService.send(
-                        title: "New Sprite Added",
-                        body: body,
-                        identifier: "sprite-new-\(notificationKey(change.name))",
-                        spriteName: change.name
-                    )
-                }
-            }
-
-            for change in summary.masteredSprites {
-                addSpriteActivity(kind: .mastered, title: "Sprite mastered 👑", message: "\(change.name) has the mastery crown.", change: change)
-                notificationService.send(
-                    title: "Sprite Mastered 👑",
-                    body: "\(change.name) is mastered in \(profileName).",
-                    identifier: "sprite-mastered-\(notificationKey(change.name))",
-                    spriteName: change.name
-                )
-            }
-
-            for change in summary.levelUps {
-                let oldLevel = change.previousLevel ?? 0
-                let newLevel = change.newLevel ?? oldLevel
-                addSpriteActivity(kind: .levelUp, title: "Sprite leveled up", message: "\(change.name) · Lvl \(oldLevel) → Lvl \(newLevel)", change: change)
-                notificationService.send(
-                    title: "Sprite Level Updated",
-                    body: "\(change.name) · Lvl \(oldLevel) → Lvl \(newLevel)",
-                    identifier: "sprite-level-\(notificationKey(change.name))-\(newLevel)",
-                    spriteName: change.name
-                )
-            }
-
-            for change in summary.lostSprites {
-                addSpriteActivity(kind: .lost, title: "Sprite lost in past match", message: "\(change.name) is greyed out in Fortnite but remains in your unlocked collection.", change: change)
-                notificationService.send(
-                    title: "Sprite Lost",
-                    body: "\(change.name) was lost in a past match. It still counts as unlocked.",
-                    identifier: "sprite-lost-\(notificationKey(change.name))",
-                    spriteName: change.name
-                )
-            }
+        if sessionInitialOwnedCount == 0 {
+            // First scan stays quiet apart from an occasional progress note.
+            sendFirstScanProgressIfDue()
+        } else {
+            queueCollectionUpdateNotification(summary)
         }
 
         if shouldFinishAfterApply {
             shouldFinishAfterApply = false
             Task { [weak self] in await self?.finishHotkeyScanSession(completed: true) }
         }
+    }
+
+    /// Collects collection changes and emits them as one banner.
+    ///
+    /// A scan applies detections frame after frame, so sending per batch would
+    /// still stack up. Accumulate instead and flush after a quiet moment, under
+    /// a stable identifier so a later flush replaces the earlier banner rather
+    /// than adding to it.
+    private func queueCollectionUpdateNotification(_ summary: DetectionApplySummary) {
+        for change in summary.newSprites { pendingNewNames.append(change.name) }
+        for change in summary.levelUps { pendingLevelNames.append(change.name) }
+        for change in summary.masteredSprites { pendingMasteredNames.append(change.name) }
+        for change in summary.lostSprites { pendingLostNames.append(change.name) }
+
+        guard hasPendingCollectionUpdate else { return }
+        collectionUpdateFlushTask?.cancel()
+        collectionUpdateFlushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(collectionUpdateQuietPeriod * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.flushCollectionUpdateNotification() }
+        }
+    }
+
+    private var hasPendingCollectionUpdate: Bool {
+        !(pendingNewNames.isEmpty && pendingLevelNames.isEmpty
+          && pendingMasteredNames.isEmpty && pendingLostNames.isEmpty)
+    }
+
+    func flushCollectionUpdateNotification() {
+        collectionUpdateFlushTask?.cancel()
+        collectionUpdateFlushTask = nil
+        guard hasPendingCollectionUpdate else { return }
+
+        var parts: [String] = []
+        if !pendingNewNames.isEmpty { parts.append("\(Set(pendingNewNames).count) new") }
+        if !pendingLevelNames.isEmpty { parts.append("\(Set(pendingLevelNames).count) leveled") }
+        if !pendingMasteredNames.isEmpty { parts.append("\(Set(pendingMasteredNames).count) mastered") }
+        if !pendingLostNames.isEmpty { parts.append("\(Set(pendingLostNames).count) lost") }
+
+        // Lead with the names most worth seeing, then fall back to a count.
+        let highlights = Array(NSOrderedSet(array: pendingNewNames + pendingMasteredNames + pendingLevelNames)
+            .array.compactMap { $0 as? String })
+        let shown = highlights.prefix(3).joined(separator: ", ")
+        let extra = highlights.count - min(highlights.count, 3)
+        let detail = shown.isEmpty
+            ? ""
+            : (extra > 0 ? " · \(shown) and \(extra) more" : " · \(shown)")
+
+        notificationService.send(
+            title: "Collection Updated",
+            body: parts.joined(separator: " · ") + detail,
+            identifier: "sprite-collection-update",
+            spriteName: highlights.count == 1 ? highlights.first : nil,
+            openActivityCenter: highlights.count != 1
+        )
+
+        pendingNewNames.removeAll()
+        pendingLevelNames.removeAll()
+        pendingMasteredNames.removeAll()
+        pendingLostNames.removeAll()
     }
 
     /// 6.2 — periodic "still scanning" summary during an otherwise silent first
@@ -1116,6 +1134,10 @@ final class LiveCaptureManager: ObservableObject {
         isStreaming = false
         isHotkeyScanning = false
         stopSessionTimer()
+
+        // Anything still waiting on the quiet-period debounce is announced now,
+        // before the scan-finished banner, so no change goes unreported.
+        flushCollectionUpdateNotification()
 
         let summary = ScanChangeSummary(
             newSprites: newNames.sorted(),

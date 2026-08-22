@@ -9,7 +9,7 @@ enum Fixes {
     // Stage 0
     /// Writes full frames, card crops, OCR strings and candidate rankings to
     /// ~/Library/Application Support/SpriteVault/Debug on every analysed frame.
-    static let debugDump = false
+    static let debugDump = true
 
     // Stage 1 — geometry
     static let newCardGeometry = true

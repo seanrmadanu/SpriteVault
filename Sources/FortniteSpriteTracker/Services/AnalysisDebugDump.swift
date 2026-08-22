@@ -17,6 +17,19 @@ final class AnalysisDebugDump {
     private var notes: [String] = []
     private var cardCount = 0
 
+    /// A live scan analyses many stable frames, and each dump is a full-size
+    /// frame plus a crop per card. Cap it so leaving the flag on cannot quietly
+    /// fill the disk; the early frames are the ones worth inspecting anyway.
+    private static let maximumDumps = 40
+    private static let lock = NSLock()
+    private static var dumpsThisLaunch = 0
+
+    static var reachedLimit: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return dumpsThisLaunch >= maximumDumps
+    }
+
     static var baseDirectory: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return support.appendingPathComponent("SpriteVault/Debug", isDirectory: true)
@@ -24,6 +37,13 @@ final class AnalysisDebugDump {
 
     init?() {
         guard Fixes.debugDump else { return nil }
+
+        Self.lock.lock()
+        let allowed = Self.dumpsThisLaunch < Self.maximumDumps
+        if allowed { Self.dumpsThisLaunch += 1 }
+        Self.lock.unlock()
+        guard allowed else { return nil }
+
         let stamp = ISO8601DateFormatter()
         stamp.formatOptions = [.withYear, .withMonth, .withDay, .withTime, .withColonSeparatorInTime]
         let name = stamp.string(from: Date()).replacingOccurrences(of: ":", with: "-")
