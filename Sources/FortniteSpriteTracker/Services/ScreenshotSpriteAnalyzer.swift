@@ -501,14 +501,20 @@ actor ScreenshotSpriteAnalyzer {
             height: viewport.height * 0.245
         )
         guard let header = cropTopLeft(screenshot, to: headerRect) else { return false }
+        // Upscale for OCR only. The gate used to read the crop at whatever size
+        // the source happened to give it, so a smaller window — or a recording
+        // played back scaled down — made the tab text too small to recognise and
+        // the whole frame was rejected. The colour probes below still run on the
+        // untouched crop, since `preparedTextImage` desaturates.
+        let ocrImage = preparedTextImage(header, targetWidth: 1100) ?? header
 
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .fast
+        request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
-        request.minimumTextHeight = 0.032
+        request.minimumTextHeight = 0.020
         request.customWords = ["SPRITES", "COLLECTION", "REWARDS"]
 
-        let handler = VNImageRequestHandler(cgImage: header, options: [:])
+        let handler = VNImageRequestHandler(cgImage: ocrImage, options: [:])
         try handler.perform([request])
 
         let observations = request.results ?? []
@@ -520,18 +526,31 @@ actor ScreenshotSpriteAnalyzer {
         // A capture-card feed of a console is soft, so the tab words rarely OCR
         // cleanly — "COLLECTION" comes back as "COLLEERWM", or not at all. Match
         // SPRITES tolerantly; prove COLLECTION from its underline instead.
-        guard let spritesObservation = recognized.first(where: { headerWordMatches($0.0, "SPRITES") })?.1 else {
-            return false
-        }
         guard hasCollectionUnderline(screenshot, viewport: viewport) else { return false }
 
-        // OCR proves the word exists, not that the tab is selected. Derive the
-        // visual test rectangle from OCR coordinates so OBS title bars,
-        // letterboxing, and different window sizes cannot shift calibration.
-        let spritesText = topLeftRect(spritesObservation.boundingBox, in: header)
-        let spritesTab = spritesText
-            .insetBy(dx: -spritesText.width * 0.42, dy: -spritesText.height * 0.62)
-            .intersection(CGRect(x: 0, y: 0, width: header.width, height: header.height))
+        let headerBounds = CGRect(x: 0, y: 0, width: header.width, height: header.height)
+        let spritesTab: CGRect
+        if let observation = recognized.first(where: { headerWordMatches($0.0, "SPRITES") })?.1 {
+            // OCR proves the word exists, not that the tab is selected. Derive
+            // the visual test rectangle from OCR coordinates so title bars and
+            // different window sizes cannot shift calibration.
+            let text = topLeftRect(observation.boundingBox, in: header)
+            spritesTab = text
+                .insetBy(dx: -text.width * 0.42, dy: -text.height * 0.62)
+                .intersection(headerBounds)
+        } else {
+            // Scaled-down sources render the tab text too small to OCR. The
+            // viewport is known precisely from the underline, so fall back to
+            // where the tab sits in the layout and let the colour probe decide.
+            let tab = CGRect(x: 0.148, y: 0.069, width: 0.078, height: 0.042)
+            spritesTab = CGRect(
+                x: (viewport.minX + viewport.width * tab.minX) - headerRect.minX,
+                y: (viewport.minY + viewport.height * tab.minY) - headerRect.minY,
+                width: viewport.width * tab.width,
+                height: viewport.height * tab.height
+            ).intersection(headerBounds)
+        }
+        guard !spritesTab.isEmpty else { return false }
 
         // Intentionally conservative: the SPRITES tab must actually be wearing
         // its pale selected pill before overlays or collection writes happen.
@@ -1032,7 +1051,13 @@ actor ScreenshotSpriteAnalyzer {
         // measured column positions when we have them — sampling the wrong
         // strips would measure the background instead of the cards.
         let stripWidth = 48
-        var energy = [Double](repeating: 0, count: bandHeight)
+        // Signed, not absolute. A card's top edge is a dark-to-bright step going
+        // down the image and its bottom edge is bright-to-dark; scoring both with
+        // |gradient| made those interchangeable, so the comb could settle a
+        // fraction of a row low and sit on the bright level-pill strip instead of
+        // the card top. Keeping the direction pins the phase to real card tops.
+        var rise = [Double](repeating: 0, count: bandHeight)
+        var fall = [Double](repeating: 0, count: bandHeight)
         var sampled = false
         for column in 0..<GridMetrics.columnCount {
             let centre: CGFloat
@@ -1067,7 +1092,8 @@ actor ScreenshotSpriteAnalyzer {
                 rowMean[y] = total / Double(stripWidth)
             }
             for y in 4..<bandHeight {
-                energy[y] += abs(rowMean[y] - rowMean[y - 4])
+                let delta = rowMean[y] - rowMean[y - 4]
+                if delta > 0 { rise[y] += delta } else { fall[y] += -delta }
             }
         }
         guard sampled else { return [] }
@@ -1094,7 +1120,9 @@ actor ScreenshotSpriteAnalyzer {
             var rows = 0
             var y = phase
             while y + card < Double(bandHeight) {
-                total += energy[Int(y)] + energy[Int(y + card)]
+                // Reward a brightening edge at the card top and a darkening edge
+                // at its bottom, which only line up on a genuine card.
+                total += rise[Int(y)] + fall[Int(y + card)]
                 rows += 1
                 y += step
             }
@@ -1981,7 +2009,111 @@ actor ScreenshotSpriteAnalyzer {
         )
     }
 
+    /// Locates the game view by finding the COLLECTION tab underline.
+    ///
+    /// Trimming black bars only works when the game is surrounded by black. A
+    /// recording played back in a window sits on a desktop, inside player
+    /// chrome, at an arbitrary scale — nothing gets trimmed, the whole canvas is
+    /// taken as the game view, and every fraction derived from it is wrong.
+    ///
+    /// The underline is a solid yellow bar of fixed proportions in a fixed place
+    /// in the layout, so finding it anywhere in the frame gives both the scale
+    /// and the origin. Measured across the ground-truth captures it is 0.1152 of
+    /// the picture wide, centred at x 0.4426 and y 0.2241.
+    private func underlineViewport(in image: CGImage) -> CGRect? {
+        // Sample close to native. The underline is only a handful of scanlines
+        // tall once a source is scaled down, and averaging it into neighbouring
+        // rows desaturates it below the yellow test.
+        let sampleWidth = min(1920, image.width)
+        guard sampleWidth >= 320 else { return nil }
+        let sampleHeight = max(1, Int(
+            (CGFloat(image.height) / CGFloat(max(image.width, 1))) * CGFloat(sampleWidth)
+        ))
+        guard let pixels = downsampleRGBA(image, width: sampleWidth, height: sampleHeight) else {
+            return nil
+        }
+
+        // Longest run of tab-yellow on each scanline.
+        var runLength = [Int](repeating: 0, count: sampleHeight)
+        var runStart = [Int](repeating: 0, count: sampleHeight)
+        for y in 0..<sampleHeight {
+            var current = 0
+            var start = 0
+            for x in 0..<sampleWidth {
+                let offset = (y * sampleWidth + x) * 4
+                let r = Int(pixels[offset])
+                let g = Int(pixels[offset + 1])
+                let b = Int(pixels[offset + 2])
+                if r >= 170, g >= 140, b <= 130, r > b + 40, g > b + 20 {
+                    if current == 0 { start = x }
+                    current += 1
+                    if current > runLength[y] {
+                        runLength[y] = current
+                        runStart[y] = start
+                    }
+                } else {
+                    current = 0
+                }
+            }
+        }
+
+        // Group vertically adjacent scanlines that share a run, then keep the
+        // longest *thin* group. The EQUIP button is a longer run but far taller,
+        // so height is what separates the underline from it.
+        let minimumRun = sampleWidth / 40
+        // Thinness has to be judged against the bar's own length, not the frame.
+        // A frame-relative limit breaks as soon as the game is scaled down inside
+        // the frame: the EQUIP button shrinks too and slips under the threshold.
+        // The underline runs about 40:1, EQUIP about 15:1, at any scale.
+        let minimumAspect = 25.0
+        var best: (centreX: Double, centreY: Double, length: Int)?
+        var y = 0
+        while y < sampleHeight {
+            guard runLength[y] > minimumRun else { y += 1; continue }
+            var end = y
+            while end + 1 < sampleHeight,
+                  runLength[end + 1] > minimumRun,
+                  abs(runStart[end + 1] - runStart[y]) < sampleWidth / 50 {
+                end += 1
+            }
+            let thickness = end - y + 1
+            let middle = (y + end) / 2
+            let isThin = Double(runLength[middle]) / Double(thickness) >= minimumAspect
+            if isThin, runLength[middle] > (best?.length ?? 0) {
+                best = (
+                    Double(runStart[middle]) + Double(runLength[middle]) / 2,
+                    Double(middle),
+                    runLength[middle]
+                )
+            }
+            y = end + 1
+        }
+        guard let best else { return nil }
+
+        let scale = CGFloat(image.width) / CGFloat(sampleWidth)
+        let width = CGFloat(best.length) / 0.1152 * scale
+        let height = width * 9 / 16
+        let originX = CGFloat(best.centreX) * scale - width * 0.4426
+        let originY = CGFloat(best.centreY) * scale - height * 0.2241
+
+        // Reject a nonsense fit rather than letting it drive the whole analysis.
+        guard width > CGFloat(image.width) * 0.30,
+              width <= CGFloat(image.width) * 1.02,
+              height <= CGFloat(image.height) * 1.02,
+              originX > -width * 0.02,
+              originY > -height * 0.02,
+              originX + width < CGFloat(image.width) * 1.02,
+              originY + height < CGFloat(image.height) * 1.02 else {
+            return nil
+        }
+
+        return CGRect(x: originX, y: originY, width: width, height: height)
+    }
+
     private func contentViewport(in image: CGImage) -> CGRect {
+        if Fixes.anchorViewportOnUnderline, let rect = underlineViewport(in: image) {
+            return rect
+        }
         if Fixes.hardEdgeLetterbox {
             return hardEdgeViewport(in: image)
         }

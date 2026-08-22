@@ -1300,28 +1300,75 @@ private final class SpriteScanOverlayView: NSView {
         }
     }
 
+    /// Draws the grid as a lattice through the gutters rather than a box per
+    /// card. The lines land in the dead space Fortnite leaves between cards, so
+    /// they never sit on top of artwork, and a small alignment error shows up as
+    /// a line drifting off a gutter instead of a box cutting across two Sprites.
     private func drawAlignedCards() {
-        for anchor in cardAnchors {
-            let slot = anchor.slot
-            let rect = cardRect(for: anchor)
-            guard rect.width >= 16, rect.height >= 16 else { continue }
+        let rects = cardAnchors.reduce(into: [Int: CGRect]()) { $0[$1.slot] = cardRect(for: $1) }
+        guard !rects.isEmpty else { return }
 
-            let state = cardStates[slot]
-            let colour = outlineColour(for: state, slot: slot)
-            let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
+        // Recover the row and column bands from the card rectangles.
+        var columnBands: [(min: CGFloat, max: CGFloat)] = []
+        var rowBands: [(min: CGFloat, max: CGFloat)] = []
+        for (slot, rect) in rects.sorted(by: { $0.key < $1.key }) {
+            let column = slot % 3
+            let row = slot / 3
+            while columnBands.count <= column { columnBands.append((.infinity, -.infinity)) }
+            while rowBands.count <= row { rowBands.append((.infinity, -.infinity)) }
+            columnBands[column] = (min(columnBands[column].min, rect.minX),
+                                   max(columnBands[column].max, rect.maxX))
+            rowBands[row] = (min(rowBands[row].min, rect.minY),
+                             max(rowBands[row].max, rect.maxY))
+        }
+        columnBands = columnBands.filter { $0.min.isFinite && $0.max.isFinite }
+        rowBands = rowBands.filter { $0.min.isFinite && $0.max.isFinite }
+        // This view is not flipped, so row 0 sits at the *highest* y. The outer
+        // bounds are therefore the first row's top edge and the last row's
+        // bottom edge — taking first.min/last.max instead draws the lattice
+        // across the middle rows only.
+        guard let left = columnBands.first?.min, let right = columnBands.last?.max,
+              let top = rowBands.first?.max, let bottom = rowBands.last?.min else { return }
 
-            // Darken the inside so a name printed over busy artwork stays
-            // readable. Locked cards stay untinted; there is nothing to read.
-            if state != .locked {
-                NSColor.black.withAlphaComponent(hoveredSlot == slot ? 0.34 : 0.22).setFill()
-                path.fill()
-            }
+        let lattice = NSColor(calibratedRed: 0.35, green: 0.95, blue: 1.0, alpha: 0.85)
+        lattice.setStroke()
 
-            colour.withAlphaComponent(hoveredSlot == slot ? 1.0 : 0.92).setStroke()
-            path.lineWidth = hoveredSlot == slot ? 3.0 : 2.0
+        func line(from a: CGPoint, to b: CGPoint, width: CGFloat) {
+            let path = NSBezierPath()
+            path.move(to: a)
+            path.line(to: b)
+            path.lineWidth = width
             path.stroke()
+        }
 
-            guard let state else { continue }
+        // Outer bounds, then a line down the centre of every gutter.
+        line(from: CGPoint(x: left, y: top), to: CGPoint(x: right, y: top), width: 1.5)
+        line(from: CGPoint(x: left, y: bottom), to: CGPoint(x: right, y: bottom), width: 1.5)
+        line(from: CGPoint(x: left, y: top), to: CGPoint(x: left, y: bottom), width: 1.5)
+        line(from: CGPoint(x: right, y: top), to: CGPoint(x: right, y: bottom), width: 1.5)
+
+        for index in 1..<max(columnBands.count, 1) {
+            let gutter = (columnBands[index - 1].max + columnBands[index].min) / 2
+            line(from: CGPoint(x: gutter, y: top), to: CGPoint(x: gutter, y: bottom), width: 2.0)
+        }
+        for index in 1..<max(rowBands.count, 1) {
+            // NSView is not flipped here, so a later row sits lower on screen.
+            let gutter = (rowBands[index - 1].min + rowBands[index].max) / 2
+            line(from: CGPoint(x: left, y: gutter), to: CGPoint(x: right, y: gutter), width: 2.0)
+        }
+
+        // Per-cell state still needs to read, but without a competing outline.
+        for (slot, rect) in rects {
+            guard let state = cardStates[slot] else { continue }
+            if hoveredSlot == slot {
+                NSColor.black.withAlphaComponent(0.30).setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
+                outlineColour(for: state, slot: slot).setStroke()
+                let highlight = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
+                highlight.lineWidth = 2.5
+                highlight.stroke()
+                lattice.setStroke()
+            }
             drawState(state, in: rect, slot: slot)
         }
     }

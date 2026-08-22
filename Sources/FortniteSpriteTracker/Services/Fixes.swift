@@ -14,6 +14,10 @@ enum Fixes {
     // Stage 1 — geometry
     static let newCardGeometry = true
     static let hardEdgeLetterbox = true
+    /// Find the game view from the COLLECTION tab underline rather than by
+    /// trimming black bars. Black-bar trimming only works when the game is
+    /// surrounded by black; a recording played back in a window is not.
+    static let anchorViewportOnUnderline = true
     static let detectRowPhase = true
     /// Measure the card grid from the picture instead of assuming the
     /// letterbox-trimmed frame is the 16:9 game view. Lets a screen recording,
