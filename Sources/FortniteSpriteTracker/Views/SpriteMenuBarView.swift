@@ -48,6 +48,8 @@ struct SpriteMenuBarView: View {
                 HStack(spacing: 8) {
                     compactMetric("COLLECTION", liveCapture.collectionText)
                     compactMetric("SCAN", liveCapture.coverageText)
+                    // 6.1 — this was computed every frame and never displayed.
+                    compactMetric("READ", "\(liveCapture.sessionObservedSpriteCount)")
                     compactMetric("CHANGES", "+\(liveCapture.changesSoFar)")
                 }
             }

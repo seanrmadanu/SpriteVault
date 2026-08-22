@@ -106,6 +106,13 @@ final class LiveCaptureManager: ObservableObject {
     private var sessionProfileName = "My Collection"
     private var sessionSeenNames = Set<String>()
     private var coveredCatalogIndexes = Set<Int>()
+    /// Per-slot running agreement: what the slot last claimed, and for how many
+    /// consecutive stable frames it has claimed it.
+    private var slotAgreement: [Int: (fingerprint: String, count: Int)] = [:]
+    private let requiredAgreementFrames = 2
+    private var lastProgressNotificationAt: Date?
+    private let progressNotificationInterval: TimeInterval = 45
+    private let groupedNotificationThreshold = 4
     private var shouldFinishAfterApply = false
     private var newNames = Set<String>()
     private var levelUpNames = Set<String>()
@@ -338,7 +345,7 @@ final class LiveCaptureManager: ObservableObject {
                     throw LiveCaptureError.sourceUnavailable
                 }
                 sourceKey = "system:\(selection.styleName):\(selection.displayName):\(selection.width)x\(selection.height)"
-                sourceLabel = "\(selection.styleName): \(selection.displayName)"
+                sourceLabel = selection.menuBarLabel
                 image = try await captureService.captureSystemSelectionOnce()
 
                 guard previewRequestID == requestID,
@@ -669,19 +676,48 @@ final class LiveCaptureManager: ObservableObject {
         for change in summary.lostSprites { lostNames.insert(change.name) }
         refreshChangeCounters()
 
-        // Initial profile syncs get one detailed completion entry instead of a
-        // wall of system banners. Subsequent scans produce clickable alerts.
-        if sessionInitialOwnedCount > 0 {
+        // 6.2 — a first scan used to be completely silent until it finished.
+        // Keep the per-Sprite banners suppressed, but send an occasional
+        // progress summary so the user knows it is working.
+        if sessionInitialOwnedCount == 0 {
             for change in summary.newSprites {
                 let levelText = change.newLevel.map { "Lvl \($0)" } ?? "Unlocked"
                 let body = "\(change.name) · \(levelText)\(change.becameMastered ? " · Mastered 👑" : "")"
                 addSpriteActivity(kind: .newSprite, title: "New Sprite added", message: body, change: change)
+            }
+            sendFirstScanProgressIfDue()
+        }
+
+        // Initial profile syncs get one detailed completion entry instead of a
+        // wall of system banners. Subsequent scans produce clickable alerts.
+        if sessionInitialOwnedCount > 0 {
+            // 6.3 — 40 new Sprites must not become 40 banners.
+            if summary.newSprites.count > groupedNotificationThreshold {
+                let names = summary.newSprites.prefix(3).map(\.name).joined(separator: ", ")
+                let extra = summary.newSprites.count - 3
+                for change in summary.newSprites {
+                    let levelText = change.newLevel.map { "Lvl \($0)" } ?? "Unlocked"
+                    let body = "\(change.name) · \(levelText)\(change.becameMastered ? " · Mastered 👑" : "")"
+                    addSpriteActivity(kind: .newSprite, title: "New Sprite added", message: body, change: change)
+                }
                 notificationService.send(
-                    title: "New Sprite Added",
-                    body: body,
-                    identifier: "sprite-new-\(notificationKey(change.name))",
-                    spriteName: change.name
+                    title: "\(summary.newSprites.count) New Sprites Added",
+                    body: extra > 0 ? "\(names) and \(extra) more." : names,
+                    identifier: "sprite-new-batch-\(UUID().uuidString)",
+                    spriteName: nil
                 )
+            } else {
+                for change in summary.newSprites {
+                    let levelText = change.newLevel.map { "Lvl \($0)" } ?? "Unlocked"
+                    let body = "\(change.name) · \(levelText)\(change.becameMastered ? " · Mastered 👑" : "")"
+                    addSpriteActivity(kind: .newSprite, title: "New Sprite added", message: body, change: change)
+                    notificationService.send(
+                        title: "New Sprite Added",
+                        body: body,
+                        identifier: "sprite-new-\(notificationKey(change.name))",
+                        spriteName: change.name
+                    )
+                }
             }
 
             for change in summary.masteredSprites {
@@ -721,6 +757,25 @@ final class LiveCaptureManager: ObservableObject {
             shouldFinishAfterApply = false
             Task { [weak self] in await self?.finishHotkeyScanSession(completed: true) }
         }
+    }
+
+    /// 6.2 — periodic "still scanning" summary during an otherwise silent first
+    /// scan. Rate-limited so a long scan produces a handful of updates, not one
+    /// per frame.
+    private func sendFirstScanProgressIfDue() {
+        let now = Date()
+        if let last = lastProgressNotificationAt,
+           now.timeIntervalSince(last) < progressNotificationInterval {
+            return
+        }
+        guard scanCoverageCount > 0 else { return }
+        lastProgressNotificationAt = now
+        notificationService.send(
+            title: "Building Your Collection",
+            body: "\(scanCoverageCount)/\(totalSpriteCount) Sprites read · \(changesSoFar) changes so far.",
+            identifier: "sprite-scan-progress",
+            spriteName: nil
+        )
     }
 
     var shortcutText: String { "⌃⌥S" }
@@ -907,7 +962,17 @@ final class LiveCaptureManager: ObservableObject {
             return
         }
 
-        if !analysis.coveredCatalogIndexes.isEmpty {
+        // 4.4 — coverage means "this catalog position was actually identified",
+        // not "a page start was guessed and a row was on screen". Widening it
+        // from an inferred page start let a scan reach 117 without ever reading
+        // large parts of the list, and then auto-complete.
+        if Fixes.confirmedCoverageOnly {
+            let confirmed = analysis.detections.compactMap(\.catalogIndex)
+            if !confirmed.isEmpty {
+                coveredCatalogIndexes.formUnion(confirmed)
+                scanCoverageCount = coveredCatalogIndexes.count
+            }
+        } else if !analysis.coveredCatalogIndexes.isEmpty {
             coveredCatalogIndexes.formUnion(analysis.coveredCatalogIndexes)
             scanCoverageCount = coveredCatalogIndexes.count
         } else if let pageStart = analysis.inferredPageStart {
@@ -938,6 +1003,21 @@ final class LiveCaptureManager: ObservableObject {
             lastDetectionSignature = signature
             latestDetections = analysis.detections
             resultRevision = UUID()
+        }
+
+        // 4.1 — the old path wrote on the first frame whose signature changed,
+        // so one bad frame was committed permanently. Require the same slot to
+        // report the same identity across separate stable frames, or a
+        // right-panel confirmation, before anything reaches the profile.
+        if Fixes.requireAgreement {
+            let agreed = detectionsWithAgreement(analysis)
+            if agreed.isEmpty {
+                checkForAutomaticCompletion(afterApplying: false)
+            } else {
+                checkForAutomaticCompletion(afterApplying: true)
+                saveConfirmedDetections(agreed)
+            }
+        } else if isNewDetectionPage {
             checkForAutomaticCompletion(afterApplying: true)
             saveConfirmedDetections(analysis.detections)
         } else {
@@ -946,6 +1026,52 @@ final class LiveCaptureManager: ObservableObject {
 
         scanPhase = .scanning
         statusText = "Scanning · collection \(targetCollectionCount)/\(totalSpriteCount) · coverage \(scanCoverageCount)/\(totalSpriteCount) · \(changesSoFar) changes."
+    }
+
+    /// Detections that have earned the right to be written.
+    ///
+    /// A detection qualifies when the same grid slot has reported the same
+    /// Sprite, level and mastery on `requiredAgreementFrames` distinct stable
+    /// frames, or when the right-hand detail panel names it outright — that
+    /// panel prints the exact selected Sprite, so it is proof on its own.
+    private func detectionsWithAgreement(_ analysis: SpriteFrameAnalysis) -> [DetectedSprite] {
+        var ready: [DetectedSprite] = []
+
+        for detection in analysis.detections {
+            let confirmedByPanel = analysis.selectedSpriteName.map {
+                normalizedName($0) == normalizedName(detection.name)
+            } ?? false
+
+            if confirmedByPanel {
+                ready.append(detection)
+                if let slot = detection.gridSlot { slotAgreement[slot] = nil }
+                continue
+            }
+
+            guard let slot = detection.gridSlot else { continue }
+            let fingerprint = "\(normalizedName(detection.name))"
+                + "|\(detection.status.rawValue)"
+                + "|\(detection.level.map(String.init) ?? "?")"
+                + "|\(detection.mastered ? "M" : "N")"
+
+            if let existing = slotAgreement[slot], existing.fingerprint == fingerprint {
+                let count = existing.count + 1
+                if count >= requiredAgreementFrames {
+                    ready.append(detection)
+                    slotAgreement[slot] = nil
+                } else {
+                    slotAgreement[slot] = (fingerprint, count)
+                }
+            } else {
+                slotAgreement[slot] = (fingerprint, 1)
+            }
+        }
+
+        return ready
+    }
+
+    private func normalizedName(_ value: String) -> String {
+        value.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
     /// Save from the manager, not from ContentView. A scan must remain durable
@@ -1111,6 +1237,7 @@ final class LiveCaptureManager: ObservableObject {
         isCollectionScreenDetected = false
         sessionSeenNames.removeAll(keepingCapacity: true)
         coveredCatalogIndexes.removeAll(keepingCapacity: true)
+        slotAgreement.removeAll(keepingCapacity: true)
         newNames.removeAll(keepingCapacity: true)
         levelUpNames.removeAll(keepingCapacity: true)
         masteredNames.removeAll(keepingCapacity: true)

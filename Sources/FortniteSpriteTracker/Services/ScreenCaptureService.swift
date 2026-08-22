@@ -856,6 +856,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
     private var deepScannedSlots = Set<Int>()
     private var rememberedStates: [Int: RememberedOverlayState] = [:]
     private var requiresRealignment = false
+    private var sessionIdentifiedNames = Set<String>()
 
     deinit {
         hoverTimer?.invalidate()
@@ -1068,12 +1069,43 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
             )
         }
 
+        // The right-hand panel names exactly one card. Mark that slot so the
+        // overlay can show which identification is independently confirmed.
+        if let selectedName = analysis.selectedSpriteName {
+            let key = selectedName.lowercased().filter { $0.isLetter || $0.isNumber }
+            view.selectedSlot = analysis.detections.first {
+                $0.name.lowercased().filter { $0.isLetter || $0.isNumber } == key
+            }?.gridSlot
+        } else {
+            view.selectedSlot = nil
+        }
+
+        sessionIdentifiedNames.formUnion(analysis.detections.map(\.name))
+        view.spritesRead = sessionIdentifiedNames.count
+        if view.sessionStartedAt == nil { view.sessionStartedAt = Date() }
+
         view.mode = .collection
         view.statusText = analysis.detections.isEmpty
             ? "Cards aligned · hover 👎 to retry"
             : "Cards aligned · \(analysis.detections.count) recognized"
         view.cardStates = states
         view.needsDisplay = true
+    }
+
+    /// Distinct Sprites identified during this overlay session, for the readout.
+    func resetSessionReadout(newThisSession: Int) {
+        precondition(Thread.isMainThread)
+        sessionIdentifiedNames.removeAll()
+        overlayView?.spritesRead = 0
+        overlayView?.newThisSession = newThisSession
+        overlayView?.sessionStartedAt = Date()
+    }
+
+    func setNewThisSession(_ count: Int) {
+        precondition(Thread.isMainThread)
+        guard overlayView?.newThisSession != count else { return }
+        overlayView?.newThisSession = count
+        overlayView?.needsDisplay = true
     }
 
     func finishDeepScan(slot: Int, detection: DetectedSprite?) {
@@ -1178,6 +1210,12 @@ private final class SpriteScanOverlayView: NSView {
     var cardAnchors: [SpriteCardAnchor] = []
     var hoveredSlot: Int?
     var processingPhase = 0
+    /// Slot the right-hand detail panel is currently describing, if known.
+    var selectedSlot: Int?
+    /// 5.2 — live session readout.
+    var spritesRead = 0
+    var newThisSession = 0
+    var sessionStartedAt: Date?
 
     private let magenta = NSColor(calibratedRed: 1.0, green: 0.10, blue: 0.72, alpha: 1.0)
 
@@ -1194,6 +1232,7 @@ private final class SpriteScanOverlayView: NSView {
             drawAlignedCards()
         }
         drawStatusPill()
+        drawSessionReadout()
     }
 
     func cardSlot(at point: CGPoint) -> Int? {
@@ -1203,18 +1242,50 @@ private final class SpriteScanOverlayView: NSView {
         return nil
     }
 
+    /// 5.1 — box colour carries the card's state at a glance.
+    ///
+    /// green   identified
+    /// yellow  currently selected, name confirmed by the right-hand panel
+    /// orange  still reading, or not confident enough to name
+    /// grey    locked
+    private func outlineColour(for state: SpriteOverlayCardState?, slot: Int) -> NSColor {
+        if slot == selectedSlot, state?.isResolvedIdentity == true {
+            return NSColor(calibratedRed: 1.00, green: 0.84, blue: 0.10, alpha: 1)
+        }
+        switch state {
+        case .recognized, .lost:
+            return NSColor(calibratedRed: 0.16, green: 0.86, blue: 0.38, alpha: 1)
+        case .processing, .needsHelp:
+            return NSColor(calibratedRed: 1.00, green: 0.56, blue: 0.10, alpha: 1)
+        case .locked:
+            return NSColor(calibratedWhite: 0.62, alpha: 1)
+        case nil:
+            return magenta
+        }
+    }
+
     private func drawAlignedCards() {
         for anchor in cardAnchors {
             let slot = anchor.slot
             let rect = cardRect(for: anchor)
             guard rect.width >= 16, rect.height >= 16 else { continue }
 
+            let state = cardStates[slot]
+            let colour = outlineColour(for: state, slot: slot)
             let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
-            magenta.withAlphaComponent(hoveredSlot == slot ? 1.0 : 0.88).setStroke()
-            path.lineWidth = hoveredSlot == slot ? 2.6 : 1.8
+
+            // Darken the inside so a name printed over busy artwork stays
+            // readable. Locked cards stay untinted; there is nothing to read.
+            if state != .locked {
+                NSColor.black.withAlphaComponent(hoveredSlot == slot ? 0.34 : 0.22).setFill()
+                path.fill()
+            }
+
+            colour.withAlphaComponent(hoveredSlot == slot ? 1.0 : 0.92).setStroke()
+            path.lineWidth = hoveredSlot == slot ? 3.0 : 2.0
             path.stroke()
 
-            guard let state = cardStates[slot] else { continue }
+            guard let state else { continue }
             drawState(state, in: rect, slot: slot)
         }
     }
@@ -1342,6 +1413,40 @@ private final class SpriteScanOverlayView: NSView {
         var attrs = attributes
         attrs[.paragraphStyle] = paragraph
         statusText.draw(in: rect.insetBy(dx: 10, dy: 8), withAttributes: attrs)
+    }
+
+    /// 5.2 — small live readout in the corner. OBS runs fullscreen while the
+    /// user plays, so the menu bar is hidden and this is the only place session
+    /// progress can be seen mid-scan.
+    private func drawSessionReadout() {
+        guard mode == .collection else { return }
+
+        var lines = ["Read \(spritesRead)/\(SpriteCatalog.all.count)"]
+        if newThisSession > 0 {
+            lines.append("New \(newThisSession)")
+        }
+        if let started = sessionStartedAt {
+            let elapsed = Int(Date().timeIntervalSince(started))
+            lines.append(String(format: "%d:%02d", elapsed / 60, elapsed % 60))
+        }
+        let text = lines.joined(separator: "   ")
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: NSColor.white
+        ]
+        let size = text.size(withAttributes: attributes)
+        let rect = CGRect(
+            x: bounds.maxX - size.width - 34,
+            y: bounds.maxY - size.height - 30,
+            width: size.width + 20,
+            height: size.height + 12
+        )
+        guard rect.minX > bounds.minX, rect.minY > bounds.minY else { return }
+
+        NSColor.black.withAlphaComponent(0.70).setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6).fill()
+        text.draw(in: rect.insetBy(dx: 10, dy: 6), withAttributes: attributes)
     }
 
     private func cardRect(for anchor: SpriteCardAnchor) -> CGRect {

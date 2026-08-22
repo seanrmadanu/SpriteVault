@@ -71,4 +71,18 @@ struct SystemCaptureSelection: Hashable, Sendable {
     let height: Int
 
     var sizeText: String { "\(width)×\(height)" }
+
+    /// 6.4 — what the menu bar should show for this source.
+    ///
+    /// `displayName` already carries the application and window title on
+    /// macOS 15.2+ ("OBS — Fullscreen Projector"), so prefixing it with the
+    /// style repeats the word "Window". Only fall back to the style prefix when
+    /// the name is a placeholder, which is what older systems return.
+    var menuBarLabel: String {
+        let placeholders = ["Selected Window", "Selected Application", "Selected Screen", "Selected Source"]
+        guard !placeholders.contains(displayName) else {
+            return "\(styleName) · \(sizeText)"
+        }
+        return displayName
+    }
 }

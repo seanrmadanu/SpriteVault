@@ -23,6 +23,8 @@
 		51A053D220EE0D2D3354F44E /* Services/GlobalCaptureHotkey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D0D234A6C70579FC5BD8FAD /* Services/GlobalCaptureHotkey.swift */; };
 		5A26B63B831E66D8DD3A0280 /* Resources/SpriteImages in Resources */ = {isa = PBXBuildFile; fileRef = B8AEE5A6C86ACEE51CE88782 /* Resources/SpriteImages */; };
 		60B0BBE843458C255B3AE08C /* Data/SpriteDescriptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F5AF29A337F54E5F2B6AF08 /* Data/SpriteDescriptions.swift */; };
+		B1D28CEDFA7447BEB5F9D5D8 /* Services/Fixes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 299AFA1F26AE4DE58081A954 /* Services/Fixes.swift */; };
+		AC60C3D6987940009E178DE6 /* Services/AnalysisDebugDump.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FADF29B803F47B3B45E60A6 /* Services/AnalysisDebugDump.swift */; };
 		622C410E98148B51DD06993C /* Services/ScreenshotSpriteAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8BCCDF6058DEEA9D018C473 /* Services/ScreenshotSpriteAnalyzer.swift */; };
 		66005B651B1BE5E187574DDC /* Services/CollectionPDFExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48944EDB6802FE7D1A4E112A /* Services/CollectionPDFExporter.swift */; };
 		69A4EB3E6C278B4A14EFB8D8 /* Models/ActivityEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9851727BD323480FE92E9846 /* Models/ActivityEvent.swift */; };
@@ -77,6 +79,8 @@
 		DAEA26E8A3BE8FFDBEEB3AA9 /* Components/ProgressPill.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components/ProgressPill.swift; sourceTree = "<group>"; };
 		DE73D86DA1A6D5B085924CA9 /* Views/VideoImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/VideoImportSheet.swift; sourceTree = "<group>"; };
 		DF29511C95D265C8407584D0 /* Services/ResourceLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/ResourceLocator.swift; sourceTree = "<group>"; };
+		299AFA1F26AE4DE58081A954 /* Services/Fixes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/Fixes.swift; sourceTree = "<group>"; };
+		2FADF29B803F47B3B45E60A6 /* Services/AnalysisDebugDump.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AnalysisDebugDump.swift; sourceTree = "<group>"; };
 		E8BCCDF6058DEEA9D018C473 /* Services/ScreenshotSpriteAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/ScreenshotSpriteAnalyzer.swift; sourceTree = "<group>"; };
 		E961FAD37144A5EB26BAB579 /* Views/ActivityCenterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ActivityCenterView.swift; sourceTree = "<group>"; };
 		EE319477EB234DE93918D27C /* Services/VideoCaptureDeviceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/VideoCaptureDeviceService.swift; sourceTree = "<group>"; };
@@ -126,6 +130,8 @@
 				0FEC0211057F9D4AE42A8575 /* Services/LiveCaptureManager.swift */,
 				DF29511C95D265C8407584D0 /* Services/ResourceLocator.swift */,
 				51413C32762853D3543F422B /* Services/ScreenCaptureService.swift */,
+				299AFA1F26AE4DE58081A954 /* Services/Fixes.swift */,
+				2FADF29B803F47B3B45E60A6 /* Services/AnalysisDebugDump.swift */,
 				E8BCCDF6058DEEA9D018C473 /* Services/ScreenshotSpriteAnalyzer.swift */,
 				171C744D23F00F1F425E17AD /* Services/SpriteStore.swift */,
 				EE319477EB234DE93918D27C /* Services/VideoCaptureDeviceService.swift */,
@@ -250,6 +256,8 @@
 				3CFDAEF71F9EAD580EABAEC9 /* Services/LiveCaptureManager.swift in Sources */,
 				3A4F52867811A63D57427C6C /* Services/ResourceLocator.swift in Sources */,
 				96E05CA315B7852E61554129 /* Services/ScreenCaptureService.swift in Sources */,
+				B1D28CEDFA7447BEB5F9D5D8 /* Services/Fixes.swift in Sources */,
+				AC60C3D6987940009E178DE6 /* Services/AnalysisDebugDump.swift in Sources */,
 				622C410E98148B51DD06993C /* Services/ScreenshotSpriteAnalyzer.swift in Sources */,
 				E9D5B8A3483DB09400772AE4 /* Services/SpriteStore.swift in Sources */,
 				7EB7C39E82480B71B8FA08F2 /* Services/VideoCaptureDeviceService.swift in Sources */,

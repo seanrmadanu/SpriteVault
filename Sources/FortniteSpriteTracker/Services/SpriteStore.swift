@@ -210,6 +210,17 @@ final class SpriteStore: ObservableObject {
     ) -> DetectionApplySummary {
         var changes: [DetectionCollectionChange] = []
 
+        // 4.5 — dry run reports what would change without touching the profile,
+        // so a scan can be compared against a known-good collection.
+        if Fixes.dryRun {
+            let summary = previewDetections(detections, to: profileID, replacingExisting: replacingExisting)
+            for change in summary.changes {
+                print("[dry-run] \(change.name): \(change.previousStatus) lvl \(change.previousLevel.map(String.init) ?? "-")"
+                      + " -> \(change.newStatus) lvl \(change.newLevel.map(String.init) ?? "-")")
+            }
+            return summary
+        }
+
         mutateProfile(profileID) { profile in
             if replacingExisting {
                 for index in profile.sprites.indices {
@@ -225,11 +236,37 @@ final class SpriteStore: ObservableObject {
                 }) else { continue }
 
                 let before = profile.sprites[index]
-                profile.sprites[index].status = detection.status
+
+                // 4.3 — a single misread must not flip collected -> lost. Only
+                // move a Sprite backwards when the frame actually saw the
+                // needs-summon pill; anything else can only add information.
+                if Fixes.guardedStatusWrites {
+                    switch (before.status, detection.status) {
+                    case (.locked, _):
+                        profile.sprites[index].status = detection.status
+                    case (.collected, .lost), (.lost, .collected):
+                        profile.sprites[index].status = detection.status
+                    default:
+                        break
+                    }
+                } else {
+                    profile.sprites[index].status = detection.status
+                }
+
                 if let detectedLevel = detection.level {
                     profile.sprites[index].level = detectedLevel
                 }
-                profile.sprites[index].mastered = profile.sprites[index].mastered || detection.mastered || profile.sprites[index].level == 5
+
+                // 4.2 — mastery used to be monotonic, so one false positive was
+                // permanent and totals could only climb. The crown is a direct
+                // observation: trust a confident negative to clear it too.
+                if Fixes.reversibleMastery {
+                    profile.sprites[index].mastered = detection.mastered
+                } else {
+                    profile.sprites[index].mastered = profile.sprites[index].mastered
+                        || detection.mastered
+                        || profile.sprites[index].level == 5
+                }
                 let after = profile.sprites[index]
 
                 guard before.status != after.status
@@ -252,6 +289,80 @@ final class SpriteStore: ObservableObject {
             }
         }
         recentEvent = nil
+
+        return DetectionApplySummary(
+            scannedNames: detections.map(\.name),
+            changes: changes
+        )
+    }
+
+    /// Computes exactly what `applyDetections` would change, without writing.
+    ///
+    /// Kept alongside the real path rather than reusing it so a dry run cannot
+    /// mutate by accident.
+    func previewDetections(
+        _ detections: [DetectedSprite],
+        to profileID: UUID,
+        replacingExisting: Bool
+    ) -> DetectionApplySummary {
+        guard let profile = profiles.first(where: { $0.id == profileID }) else {
+            return DetectionApplySummary(scannedNames: detections.map(\.name), changes: [])
+        }
+
+        var sprites = profile.sprites
+        if replacingExisting {
+            for index in sprites.indices {
+                sprites[index].status = .locked
+                sprites[index].mastered = false
+                sprites[index].level = nil
+            }
+        }
+
+        var changes: [DetectionCollectionChange] = []
+        for detection in detections {
+            guard let index = sprites.firstIndex(where: {
+                normalized($0.name) == normalized(detection.name)
+            }) else { continue }
+
+            let before = sprites[index]
+            if Fixes.guardedStatusWrites {
+                switch (before.status, detection.status) {
+                case (.locked, _):
+                    sprites[index].status = detection.status
+                case (.collected, .lost), (.lost, .collected):
+                    sprites[index].status = detection.status
+                default:
+                    break
+                }
+            } else {
+                sprites[index].status = detection.status
+            }
+            if let detectedLevel = detection.level {
+                sprites[index].level = detectedLevel
+            }
+            if Fixes.reversibleMastery {
+                sprites[index].mastered = detection.mastered
+            } else {
+                sprites[index].mastered = before.mastered || detection.mastered || sprites[index].level == 5
+            }
+            let after = sprites[index]
+
+            guard before.status != after.status
+                    || before.level != after.level
+                    || before.mastered != after.mastered else { continue }
+
+            changes.append(
+                DetectionCollectionChange(
+                    name: after.name,
+                    rarity: after.rarity,
+                    previousStatus: before.status,
+                    previousLevel: before.level,
+                    newStatus: after.status,
+                    newLevel: after.level,
+                    becameMastered: !before.mastered && after.mastered
+                )
+            )
+        }
 
         return DetectionApplySummary(
             scannedNames: detections.map(\.name),

@@ -15,12 +15,25 @@ actor ScreenshotSpriteAnalyzer {
     // Normalized to the visible 16:9 Fortnite viewport. Letterboxing is removed
     // first by contentViewport(in:), so capture-card and Remote Play windows can
     // have arbitrary outer sizes without changing these values.
-    private let firstColumnCenter: CGFloat = 0.118
-    private let columnStep: CGFloat = 0.080
+    //
+    // Fixes.newCardGeometry switches these to the values measured from the
+    // ground-truth captures; the pre-fix constants stay for bisecting.
+    private var firstColumnCenter: CGFloat {
+        Fixes.newCardGeometry ? GridMetrics.firstColumnCentre : 0.118
+    }
+    private var columnStep: CGFloat {
+        Fixes.newCardGeometry ? GridMetrics.columnStep : 0.080
+    }
     private let firstRowTop: CGFloat = 0.232
-    private let rowStep: CGFloat = 0.180
-    private let cardWidth: CGFloat = 0.079
-    private let cardHeight: CGFloat = 0.166
+    private var rowStep: CGFloat {
+        Fixes.newCardGeometry ? GridMetrics.rowStep : 0.180
+    }
+    private var cardWidth: CGFloat {
+        Fixes.newCardGeometry ? GridMetrics.cardWidth : 0.079
+    }
+    private var cardHeight: CGFloat {
+        Fixes.newCardGeometry ? GridMetrics.cardHeight : 0.166
+    }
 
     func analyze(
         url: URL,
@@ -124,6 +137,13 @@ actor ScreenshotSpriteAnalyzer {
             }
         }
 
+        let dump = AnalysisDebugDump()
+        dump?.writeFrame(screenshot, named: "frame")
+        dump?.note("viewport \(viewport)")
+        dump?.note("rows \(cardRects.count / GridMetrics.columnCount) calibrated=\(grid.isCalibrated)")
+        dump?.note("levelsBySlot \(grid.levelsBySlot.sorted { $0.key < $1.key })")
+        dump?.note("rightPanel \(detail?.item.name ?? "nil") level=\(detail.flatMap(\.level).map(String.init) ?? "-")")
+
         var cards: [CardFeature] = []
         var confidentLockedSlots = Set<Int>()
         var needsHelpSlots = Set<Int>()
@@ -133,22 +153,53 @@ actor ScreenshotSpriteAnalyzer {
             try Task.checkCancellation()
             guard let card = cardImages[slot] else { continue }
 
-            let level = grid.levelsBySlot[slot]
-            // Mastery is permanent state. Level 5 is enough to establish it,
-            // but a crown keeps mastery true at Level 1-4 after a Sprite is lost.
-            let mastered = (level == 5) || hasMasteryCrown(in: card)
+            var level = grid.levelsBySlot[slot]
+            let mastered = hasMasteryCrown(in: card)
+            let status: SpriteCollectionStatus
             let visualScore = unlockedVisualScore(in: card)
-            let status: SpriteCollectionStatus = isVisuallyLost(in: card)
-                ? .lost
-                : .collected
 
-            guard level != nil || mastered || visualScore >= 0.28 else {
-                if visualScore <= 0.10 {
+            if let dump {
+                let ratio = colouredPixelRatio(in: card)
+                let pill = pillKind(in: card)
+                dump.note(String(
+                    format: "slot %2d colour=%.3f pill=%@ crown=%@ level=%@",
+                    slot, ratio, String(describing: pill), mastered ? "Y" : "n",
+                    level.map(String.init) ?? "-"
+                ))
+                dump.writeCard(card, slot: slot, label: String(describing: pill))
+            }
+
+            if Fixes.colouredPixelOwnership {
+                // 3.4 — colour, not brightness, decides ownership, and the pill
+                // decides which owned state this is.
+                if isLockedCard(card) {
                     confidentLockedSlots.insert(slot)
-                } else {
-                    needsHelpSlots.insert(slot)
+                    continue
                 }
-                continue
+                switch pillKind(in: card) {
+                case .white:
+                    status = .collected
+                case .black:
+                    // Needs summon. Still owned, but there is no level to read.
+                    status = .lost
+                    level = nil
+                case .none:
+                    // Coloured, so not locked, but no readable pill — usually a
+                    // row clipped by the grid edge. Report it as unresolved
+                    // rather than inventing a state for it.
+                    needsHelpSlots.insert(slot)
+                    continue
+                }
+            } else {
+                status = isVisuallyLost(in: card) ? .lost : .collected
+                guard level != nil || mastered || visualScore >= 0.28 else {
+                    if visualScore <= 0.10 {
+                        confidentLockedSlots.insert(slot)
+                    } else {
+                        needsHelpSlots.insert(slot)
+                    }
+                    continue
+                }
             }
 
             guard let artwork = artworkCrop(from: card),
@@ -162,7 +213,8 @@ actor ScreenshotSpriteAnalyzer {
                 status: status,
                 level: level,
                 mastered: mastered,
-                feature: feature
+                feature: feature,
+                colours: colourHistogram(for: artwork)
             ))
         }
 
@@ -175,9 +227,15 @@ actor ScreenshotSpriteAnalyzer {
                 throw ScreenshotAnalysisError.missingReferenceArtwork
             }
 
+            // 2.1 — shape selects the family (King), colour selects the
+            // treatment (Gold / Gummy / Galaxy). Feature prints alone cannot
+            // separate the ~90 recolours that share a silhouette.
             let scoreMatrix = try cards.map { card in
-                try references.map { reference in
-                    try featureDistance(card.feature, reference.feature)
+                try references.map { reference -> Float in
+                    let shape = try featureDistance(card.feature, reference.feature)
+                    guard Fixes.colourMatching else { return shape }
+                    let colour = colourDistance(card.colours, reference.colours)
+                    return shape + colour * colourWeight
                 }
             }
 
@@ -186,6 +244,19 @@ actor ScreenshotSpriteAnalyzer {
                 references: references,
                 scores: scoreMatrix
             )
+
+            if let dump {
+                for (cardIndex, card) in cards.enumerated() {
+                    let ranked = scoreMatrix[cardIndex].enumerated()
+                        .sorted { $0.element < $1.element }
+                        .prefix(5)
+                        .map { AnalysisDebugDump.Candidate(
+                            name: references[$0.offset].item.name,
+                            distance: $0.element
+                        ) }
+                    dump.recordCandidates(slot: card.slot, candidates: Array(ranked))
+                }
+            }
 
             detections = cards.enumerated().compactMap { cardIndex, card -> DetectedSprite? in
                 guard let referenceIndex = assignments[cardIndex],
@@ -238,12 +309,28 @@ actor ScreenshotSpriteAnalyzer {
             detections.append(selectedDetection)
         }
 
-        var byName: [String: DetectedSprite] = [:]
-        for detection in detections {
-            byName[normalize(detection.name)] = detection
-        }
-        let unique = Array(byName.values).sorted {
-            ($0.gridSlot ?? Int.max) < ($1.gridSlot ?? Int.max)
+        // 2.4 — keying by name silently dropped a card whenever two slots matched
+        // the same catalog entry. One grid slot is one result.
+        let unique: [DetectedSprite]
+        if Fixes.keyResultsBySlot {
+            var bySlot: [Int: DetectedSprite] = [:]
+            var slotless: [DetectedSprite] = []
+            for detection in detections {
+                if let slot = detection.gridSlot {
+                    bySlot[slot] = detection
+                } else {
+                    slotless.append(detection)
+                }
+            }
+            unique = (bySlot.values.sorted { $0.gridSlot! < $1.gridSlot! }) + slotless
+        } else {
+            var byName: [String: DetectedSprite] = [:]
+            for detection in detections {
+                byName[normalize(detection.name)] = detection
+            }
+            unique = Array(byName.values).sorted {
+                ($0.gridSlot ?? Int.max) < ($1.gridSlot ?? Int.max)
+            }
         }
 
         let pageStart = inferredPageStart(from: unique)
@@ -293,6 +380,10 @@ actor ScreenshotSpriteAnalyzer {
         } else {
             onProgress(1.0, "Matched \(displayedDetections.count) unlocked Sprite\(displayedDetections.count == 1 ? "" : "s") in this stable view.")
         }
+
+        dump?.note("detections \(displayedDetections.map { "\($0.gridSlot ?? -1):\($0.name)" })")
+        dump?.note("locked \(lockedSlots.sorted()) needsHelp \(needsHelpSlots.sorted())")
+        dump?.finish()
 
         return SpriteFrameAnalysis(
             detections: displayedDetections,
@@ -421,31 +512,88 @@ actor ScreenshotSpriteAnalyzer {
             let text = candidate.string.uppercased().replacingOccurrences(of: "0", with: "O")
             return (text, observation)
         }
-        guard let spritesObservation = recognized.first(where: { $0.0.contains("SPRITES") })?.1,
-              let collectionObservation = recognized.first(where: { $0.0.contains("COLLECTION") })?.1 else {
+        // A capture-card feed of a console is soft, so the tab words rarely OCR
+        // cleanly — "COLLECTION" comes back as "COLLEERWM", or not at all. Match
+        // SPRITES tolerantly; prove COLLECTION from its underline instead.
+        guard let spritesObservation = recognized.first(where: { headerWordMatches($0.0, "SPRITES") })?.1 else {
             return false
         }
+        guard hasCollectionUnderline(screenshot, viewport: viewport) else { return false }
 
-        // OCR proves the words exist, not that the tabs are selected. Derive
-        // the visual test rectangles from OCR coordinates so OBS title bars,
+        // OCR proves the word exists, not that the tab is selected. Derive the
+        // visual test rectangle from OCR coordinates so OBS title bars,
         // letterboxing, and different window sizes cannot shift calibration.
         let spritesText = topLeftRect(spritesObservation.boundingBox, in: header)
-        let collectionText = topLeftRect(collectionObservation.boundingBox, in: header)
         let spritesTab = spritesText
             .insetBy(dx: -spritesText.width * 0.42, dy: -spritesText.height * 0.62)
             .intersection(CGRect(x: 0, y: 0, width: header.width, height: header.height))
-        let collectionUnderline = CGRect(
-            x: collectionText.minX - collectionText.width * 0.10,
-            y: collectionText.maxY + collectionText.height * 0.18,
-            width: collectionText.width * 1.20,
-            height: collectionText.height * 0.82
-        ).intersection(CGRect(x: 0, y: 0, width: header.width, height: header.height))
 
-        // These are intentionally conservative. OCR alone is not enough: both
-        // selected treatments must occupy a meaningful part of their OCR-driven
-        // regions before overlays or collection writes are allowed.
+        // Intentionally conservative: the SPRITES tab must actually be wearing
+        // its pale selected pill before overlays or collection writes happen.
         return paleSelectionRatio(in: header, rect: spritesTab) >= 0.20
-            && yellowSelectionRatio(in: header, rect: collectionUnderline) >= 0.08
+    }
+
+    /// The COLLECTION sub-tab underline: a solid yellow bar roughly 0.11 of the
+    /// picture wide, sitting just under the sub-navigation row.
+    ///
+    /// Read geometrically rather than from OCR. On a soft console capture the
+    /// word itself frequently fails to recognise, but the bar is unmistakable
+    /// and lands at the same place in every frame.
+    private func hasCollectionUnderline(_ screenshot: CGImage, viewport: CGRect) -> Bool {
+        let band = CGRect(
+            x: viewport.minX + viewport.width * 0.25,
+            y: viewport.minY + viewport.height * 0.19,
+            width: viewport.width * 0.55,
+            height: viewport.height * 0.07
+        )
+        guard let crop = cropTopLeft(screenshot, to: band) else { return false }
+
+        let sampleWidth = 240
+        let sampleHeight = 40
+        guard let pixels = downsampleRGBA(crop, width: sampleWidth, height: sampleHeight) else {
+            return false
+        }
+
+        // Require a contiguous yellow run. Scattered yellow UI never forms one.
+        let required = Int(Double(sampleWidth) * (0.06 / 0.55))
+        for y in 0..<sampleHeight {
+            var run = 0
+            for x in 0..<sampleWidth {
+                let offset = (y * sampleWidth + x) * 4
+                let r = Int(pixels[offset])
+                let g = Int(pixels[offset + 1])
+                let b = Int(pixels[offset + 2])
+                if r >= 175, g >= 145, b <= 125, r > b + 45, g > b + 25 {
+                    run += 1
+                    if run >= required { return true }
+                } else {
+                    run = 0
+                }
+            }
+        }
+        return false
+    }
+
+    /// Tolerant match for a header tab word against noisy OCR.
+    ///
+    /// Accepts an exact hit, a shared leading stem, or any token close enough
+    /// in edit distance. This only decides *where* to run the pale/yellow
+    /// selection probes, so being generous here costs nothing.
+    private func headerWordMatches(_ text: String, _ target: String) -> Bool {
+        let haystack = text.uppercased().filter { $0.isLetter }
+        guard !haystack.isEmpty else { return false }
+        if haystack.contains(target) { return true }
+
+        let stem = String(target.prefix(5))
+        if haystack.contains(stem) { return true }
+
+        let allowance = max(2, target.count / 3)
+        for token in text.uppercased().split(whereSeparator: { !$0.isLetter }) {
+            let candidate = String(token)
+            guard abs(candidate.count - target.count) <= allowance else { continue }
+            if editDistance(candidate, target) <= allowance { return true }
+        }
+        return false
     }
 
     private func topLeftRect(_ visionRect: CGRect, in image: CGImage) -> CGRect {
@@ -587,10 +735,45 @@ actor ScreenshotSpriteAnalyzer {
             observations.append(GridLevelObservation(level: level, point: point))
         }
 
-        let cardWidth = viewport.width * 0.076
-        let cardHeight = viewport.height * 0.145
-        let defaultRowStep = viewport.height * 0.180
+        // 1.6 — one source of truth for card size. These used to be independent
+        // pixel constants (0.076 / 0.145) that disagreed with the type's
+        // fractions, so calibrated and fallback paths cropped differently.
+        let cardWidth = viewport.width * self.cardWidth
+        let cardHeight = viewport.height * self.cardHeight
+        let defaultRowStep = viewport.height * rowStep
         let rowThreshold = viewport.height * 0.045
+
+        // 1.3/1.4 — rows come from card edges, so a fully locked row keeps its
+        // place and slots stay at absolute grid positions.
+        if Fixes.detectRowPhase {
+            let tops = detectedRowTops(in: screenshot, viewport: viewport)
+            if !tops.isEmpty {
+                let centres = (0..<GridMetrics.columnCount).map { column in
+                    viewport.minX + viewport.width * columnCentre(column)
+                }
+                var rects: [CGRect] = []
+                rects.reserveCapacity(tops.count * GridMetrics.columnCount)
+                for top in tops {
+                    for centre in centres {
+                        rects.append(CGRect(
+                            x: centre - cardWidth / 2,
+                            y: top,
+                            width: cardWidth,
+                            height: cardHeight
+                        ))
+                    }
+                }
+                var levels: [Int: Int] = [:]
+                for observation in observations {
+                    guard let slot = nearestSlot(to: observation.point, in: rects) else { continue }
+                    // 3.3 — the label must fall inside the card it is bound to,
+                    // and one card takes one reading rather than a running max.
+                    guard rects[slot].contains(observation.point) else { continue }
+                    if levels[slot] == nil { levels[slot] = observation.level }
+                }
+                return GridLayout(rects: rects, levelsBySlot: levels, isCalibrated: true)
+            }
+        }
 
         // Cluster OCR anchors into rows. Two labels in a row are enough to trust
         // its geometry; a single isolated OCR result is too easy to misplace.
@@ -680,6 +863,94 @@ actor ScreenshotSpriteAnalyzer {
         return GridLayout(rects: rects, levelsBySlot: levelsBySlot, isCalibrated: true)
     }
 
+    /// Row phase from card edges instead of level text.
+    ///
+    /// Row spacing is a known constant; only the phase moves with scroll. Card
+    /// tiles have a bright top and bottom border — locked cards included — so
+    /// correlating a comb of that period against per-scanline edge energy finds
+    /// the phase without needing any card to be readable. A row of entirely
+    /// locked cards no longer drops out and shifts every slot below it.
+    private func detectedRowTops(in image: CGImage, viewport: CGRect) -> [CGFloat] {
+        let step = viewport.height * rowStep
+        let card = viewport.height * cardHeight
+        guard step > 4, card > 4 else { return [] }
+
+        let bandTop = viewport.minY + viewport.height * 0.20
+        let bandBottom = viewport.minY + viewport.height * 0.97
+        guard bandBottom - bandTop > card else { return [] }
+
+        // Sample the three card columns at reduced width; only vertical
+        // structure matters, so a narrow strip per column is enough.
+        let stripWidth = 48
+        let bandHeight = Int(bandBottom - bandTop)
+        guard bandHeight > 8 else { return [] }
+
+        var energy = [Double](repeating: 0, count: bandHeight)
+        var sampled = false
+        for column in 0..<GridMetrics.columnCount {
+            let centre = viewport.minX + viewport.width * columnCentre(column)
+            let rect = CGRect(
+                x: centre - viewport.width * cardWidth / 2,
+                y: bandTop,
+                width: viewport.width * cardWidth,
+                height: CGFloat(bandHeight)
+            )
+            guard let strip = cropTopLeft(image, to: rect),
+                  let pixels = downsampleRGBA(strip, width: stripWidth, height: bandHeight) else {
+                continue
+            }
+            sampled = true
+            var rowMean = [Double](repeating: 0, count: bandHeight)
+            for y in 0..<bandHeight {
+                var total = 0.0
+                for x in 0..<stripWidth {
+                    let offset = (y * stripWidth + x) * 4
+                    total += Double(pixels[offset]) * 0.30
+                        + Double(pixels[offset + 1]) * 0.59
+                        + Double(pixels[offset + 2]) * 0.11
+                }
+                rowMean[y] = total / Double(stripWidth)
+            }
+            for y in 4..<bandHeight {
+                energy[y] += abs(rowMean[y] - rowMean[y - 4])
+            }
+        }
+        guard sampled else { return [] }
+
+        // Score every whole-pixel phase by the energy landing on the card top
+        // and bottom lines of every row that phase implies.
+        var bestPhase = 0.0
+        var bestScore = -1.0
+        var phase = 0.0
+        while phase < step {
+            var score = 0.0
+            var y = phase
+            while y + card < Double(bandHeight) {
+                score += energy[Int(y)]
+                score += energy[Int(y + card)]
+                y += step
+            }
+            if score > bestScore {
+                bestScore = score
+                bestPhase = phase
+            }
+            phase += 1
+        }
+        guard bestScore > 0 else { return [] }
+
+        var tops: [CGFloat] = []
+        var y = bestPhase
+        while y + card <= Double(bandHeight) {
+            tops.append(bandTop + CGFloat(y))
+            y += step
+        }
+        return tops
+    }
+
+    private func columnCentre(_ column: Int) -> CGFloat {
+        firstColumnCenter + CGFloat(column) * columnStep
+    }
+
     private func fallbackGridLayout(
         viewport: CGRect,
         observations: [GridLevelObservation]
@@ -763,9 +1034,13 @@ actor ScreenshotSpriteAnalyzer {
             return nil
         }
 
-        text = text
-            .replacingOccurrences(of: "LVLS", with: "LVL5")
-            .replacingOccurrences(of: "LEVELS", with: "LEVEL5")
+        // 3.2 — "LEVELS"/"LVLS" used to be rewritten to level 5. Any plural on
+        // screen then read as Level 5, which permanently set mastered.
+        if !Fixes.strictLevelParsing {
+            text = text
+                .replacingOccurrences(of: "LVLS", with: "LVL5")
+                .replacingOccurrences(of: "LEVELS", with: "LEVEL5")
+        }
 
         for level in 1...5 {
             if text.contains("LVL\(level)")
@@ -849,6 +1124,75 @@ actor ScreenshotSpriteAnalyzer {
         return ciContext.createCGImage(scaled, from: scaled.extent)
     }
 
+    /// Fraction of the card holding a genuinely coloured pixel.
+    ///
+    /// This is the one measurement that separates owned from locked. Brightness
+    /// does not: a locked card averages ~29, but a *selected* locked card is
+    /// near-white at ~188. Both contain no colour at all, while owned cards
+    /// measure 0.25 upwards.
+    private func colouredPixelRatio(in image: CGImage) -> Double {
+        guard let pixels = downsampleRGBA(image, width: 28, height: 28) else { return 0 }
+        var coloured = 0
+        let count = 28 * 28
+        for index in 0..<count {
+            let offset = index * 4
+            let r = Int(pixels[offset])
+            let g = Int(pixels[offset + 1])
+            let b = Int(pixels[offset + 2])
+            let maximum = max(r, max(g, b))
+            let minimum = min(r, min(g, b))
+            if maximum - minimum >= 30, maximum >= 70 { coloured += 1 }
+        }
+        return Double(coloured) / Double(count)
+    }
+
+    private func isLockedCard(_ image: CGImage) -> Bool {
+        colouredPixelRatio(in: image) < GridMetrics.lockedColourRatio
+    }
+
+    /// Which status pill an *owned* card is showing, read from the bottom-left
+    /// corner where Fortnite draws it.
+    ///
+    /// White pill with dark text -> collected, and the level is readable.
+    /// Black pill with a dust icon -> needs summon; there is no level to read.
+    ///
+    /// Only meaningful once `isLockedCard` has ruled the card out: a locked card
+    /// has no pill, yet its tile reads as uniformly dark (or uniformly white
+    /// when selected), which would otherwise imitate either pill.
+    private func pillKind(in image: CGImage) -> PillKind {
+        let width = CGFloat(image.width)
+        let height = CGFloat(image.height)
+        let rect = CGRect(
+            x: width * 0.02,
+            y: height * 0.80,
+            width: width * 0.48,
+            height: height * 0.15
+        )
+        guard let crop = cropTopLeft(image, to: rect),
+              let pixels = downsampleRGBA(crop, width: 24, height: 10) else { return .none }
+
+        var bright = 0
+        var dark = 0
+        let count = 24 * 10
+        for index in 0..<count {
+            let offset = index * 4
+            let r = Int(pixels[offset])
+            let g = Int(pixels[offset + 1])
+            let b = Int(pixels[offset + 2])
+            let maximum = max(r, max(g, b))
+            let minimum = min(r, min(g, b))
+            if maximum > 195, maximum - minimum < 55 { bright += 1 }
+            if maximum < 85 { dark += 1 }
+        }
+        let brightRatio = Double(bright) / Double(count)
+        let darkRatio = Double(dark) / Double(count)
+
+        // Measured: white pill 0.59-0.63 bright; dust pill 0.12 bright / 0.44 dark.
+        if brightRatio >= 0.35 { return .white }
+        if darkRatio >= 0.30 { return .black }
+        return .none
+    }
+
     private func unlockedVisualScore(in image: CGImage) -> Double {
         guard let pixels = downsampleRGBA(image, width: 20, height: 20) else { return 0 }
         var visible = 0
@@ -907,6 +1251,32 @@ actor ScreenshotSpriteAnalyzer {
     private func hasMasteryCrown(in image: CGImage) -> Bool {
         let width = CGFloat(image.width)
         let height = CGFloat(image.height)
+
+        // 3.1 — the crown sits top-centre. The old bottom-right region overlaps
+        // the artwork, so every "Gold X" Sprite scored as mastered while real
+        // crowns barely registered.
+        if Fixes.topCentreCrown {
+            let region = GridMetrics.crownRegion
+            let rect = CGRect(
+                x: width * region.minX,
+                y: height * region.minY,
+                width: width * region.width,
+                height: height * region.height
+            )
+            guard let crop = cropTopLeft(image, to: rect),
+                  let pixels = downsampleRGBA(crop, width: 40, height: 24) else { return false }
+            var gold = 0
+            let count = 40 * 24
+            for index in 0..<count {
+                let offset = index * 4
+                let r = Int(pixels[offset])
+                let g = Int(pixels[offset + 1])
+                let b = Int(pixels[offset + 2])
+                if r >= 170, g >= 115, b <= 125, r > b + 55, g > b + 25 { gold += 1 }
+            }
+            return Double(gold) / Double(count) > GridMetrics.crownGoldThreshold
+        }
+
         let crownRegion = CGRect(
             x: width * 0.48,
             y: height * 0.69,
@@ -967,6 +1337,7 @@ actor ScreenshotSpriteAnalyzer {
         var references: [ReferenceFeature] = []
         references.reserveCapacity(catalog.count)
 
+        var missing: [String] = []
         for (index, item) in catalog.enumerated() {
             try Task.checkCancellation()
             guard let url = ResourceLocator.spriteImageURL(named: item.imageAssetName),
@@ -976,15 +1347,28 @@ actor ScreenshotSpriteAnalyzer {
                   ] as CFDictionary),
                   let preparedImage = referenceArtworkImage(from: image),
                   let feature = try featurePrint(for: preparedImage) else {
+                // 2.5 — a silently skipped PNG degrades matching for every card
+                // and also disables the sequence path via a count == catalog
+                // guard. Collect the failures and surface them.
+                missing.append(item.name)
                 continue
             }
 
-            references.append(ReferenceFeature(item: item, catalogIndex: index, feature: feature))
+            references.append(ReferenceFeature(
+                item: item,
+                catalogIndex: index,
+                feature: feature,
+                colours: colourHistogram(for: preparedImage)
+            ))
 
             if index.isMultiple(of: 12) || index == catalog.count - 1 {
                 let fraction = Double(index + 1) / Double(max(catalog.count, 1))
                 onProgress(0.50 + fraction * 0.34, "Comparing against \(index + 1)/\(catalog.count) Sprite artworks…")
             }
+        }
+
+        if !missing.isEmpty {
+            throw ScreenshotAnalysisError.incompleteReferenceArtwork(missing)
         }
 
         cachedReferences = references
@@ -993,11 +1377,89 @@ actor ScreenshotSpriteAnalyzer {
 
     private func referenceArtworkImage(from image: CGImage) -> CGImage? {
         let source = CIImage(cgImage: image)
-        let background = CIImage(
-            color: CIColor(red: 0.90, green: 0.92, blue: 0.95, alpha: 1)
-        ).cropped(to: source.extent)
+        // 2.2 — real cards sit on a pale lilac-tinted tile, not near-white, and
+        // the artwork occupies the upper part of the card with a margin around
+        // it. Match that framing so the reference and the crop are alike.
+        let backgroundColour = Fixes.cardLikeReferences
+            ? CIColor(red: 0.84, green: 0.85, blue: 0.90, alpha: 1)
+            : CIColor(red: 0.90, green: 0.92, blue: 0.95, alpha: 1)
+        let background = CIImage(color: backgroundColour).cropped(to: source.extent)
         let composited = source.composited(over: background)
         return ciContext.createCGImage(composited, from: source.extent)
+    }
+
+    /// Coarse hue/saturation histogram over the artwork.
+    ///
+    /// Feature prints are shape-driven and nearly colour-blind, so the ~90
+    /// recolours in the catalog (Batman / Gold Batman / Gummy Batman / Galaxy
+    /// Batman …) are indistinguishable by shape alone. Colour is the signal that
+    /// separates them.
+    private func colourHistogram(for image: CGImage) -> [Double] {
+        let hueBins = 12
+        let extra = 3   // dark, grey, bright — for pixels with no useful hue
+        var histogram = [Double](repeating: 0, count: hueBins + extra)
+        guard let pixels = downsampleRGBA(image, width: 24, height: 24) else { return histogram }
+
+        var total = 0.0
+        for index in 0..<(24 * 24) {
+            let offset = index * 4
+            let r = Double(pixels[offset]) / 255
+            let g = Double(pixels[offset + 1]) / 255
+            let b = Double(pixels[offset + 2]) / 255
+            let maximum = max(r, max(g, b))
+            let minimum = min(r, min(g, b))
+            let delta = maximum - minimum
+
+            if delta < 0.12 {
+                // Achromatic: record lightness so white/grey/black treatments
+                // (Gold vs Holofoil vs base) still differ.
+                let bin = maximum < 0.30 ? 0 : (maximum < 0.70 ? 1 : 2)
+                histogram[hueBins + bin] += 1
+            } else {
+                var hue: Double
+                if maximum == r {
+                    hue = (g - b) / delta
+                } else if maximum == g {
+                    hue = 2 + (b - r) / delta
+                } else {
+                    hue = 4 + (r - g) / delta
+                }
+                hue = (hue * 60).truncatingRemainder(dividingBy: 360)
+                if hue < 0 { hue += 360 }
+                let bin = min(hueBins - 1, Int(hue / (360 / Double(hueBins))))
+                // Weight by saturation so washed-out pixels count for less.
+                histogram[bin] += delta
+            }
+            total += 1
+        }
+        guard total > 0 else { return histogram }
+        let sum = histogram.reduce(0, +)
+        guard sum > 0 else { return histogram }
+        return histogram.map { $0 / sum }
+    }
+
+    /// How much the colour histogram counts relative to the shape distance.
+    ///
+    /// Swept against the ground-truth captures. At this weight colour resolves
+    /// same-silhouette recolours that shape alone misses (Holofoil Batman,
+    /// Water) with no wrong answers. Higher weights start letting colour
+    /// override the family — Gold Batman is read as Gold Llama at 6.
+    private var colourWeight: Float { 4 }
+
+    /// Chi-squared style distance between two colour histograms, scaled into
+    /// roughly the same range as a Vision feature-print distance.
+    private func colourDistance(_ lhs: [Double], _ rhs: [Double]) -> Float {
+        guard lhs.count == rhs.count else { return 0 }
+        var total = 0.0
+        for index in lhs.indices {
+            let a = lhs[index]
+            let b = rhs[index]
+            let denominator = a + b
+            if denominator > 0 {
+                total += ((a - b) * (a - b)) / denominator
+            }
+        }
+        return Float(total)
     }
 
     private func featureDistance(
@@ -1023,6 +1485,14 @@ actor ScreenshotSpriteAnalyzer {
             row.enumerated().min(by: { $0.element < $1.element })?.offset
         }
         let confidentIndependent = scores.map { confidentNearestIndex(in: $0) }
+
+        // 2.3 — the sequence fallback below names cards by grid position against
+        // the catalog order. The in-game list has a Sort By control and its
+        // observed order does not match the catalog, so position proves nothing.
+        // A card that cannot be identified on its own evidence stays unknown.
+        if Fixes.noPositionalNaming {
+            return confidentIndependent
+        }
 
         guard cards.count >= 2,
               references.count == catalog.count,
@@ -1215,7 +1685,72 @@ actor ScreenshotSpriteAnalyzer {
         return hash
     }
 
+    /// Letterbox removal by bar detection rather than "first not-black row".
+    ///
+    /// The top of the Fortnite screen is dark navy, so a brightness threshold
+    /// walks into the picture. Instead, peel off the contiguous run of lines
+    /// from each edge that are *uniformly* near-black; the first line holding
+    /// any real content stops the scan even when that content is very dark.
+    private func hardEdgeViewport(in image: CGImage) -> CGRect {
+        let sampleWidth = 320
+        let sampleHeight = max(120, Int(
+            (CGFloat(image.height) / CGFloat(max(image.width, 1))) * CGFloat(sampleWidth)
+        ))
+        guard let pixels = downsampleRGBA(image, width: sampleWidth, height: sampleHeight) else {
+            return CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        }
+
+        // A bar line has essentially no bright pixels anywhere along it.
+        func rowIsBar(_ y: Int) -> Bool {
+            var bright = 0
+            for x in 0..<sampleWidth {
+                let offset = (y * sampleWidth + x) * 4
+                let maximum = max(pixels[offset], max(pixels[offset + 1], pixels[offset + 2]))
+                if maximum > 40 { bright += 1 }
+            }
+            return Double(bright) / Double(sampleWidth) < 0.02
+        }
+        func columnIsBar(_ x: Int) -> Bool {
+            var bright = 0
+            for y in 0..<sampleHeight {
+                let offset = (y * sampleWidth + x) * 4
+                let maximum = max(pixels[offset], max(pixels[offset + 1], pixels[offset + 2]))
+                if maximum > 40 { bright += 1 }
+            }
+            return Double(bright) / Double(sampleHeight) < 0.02
+        }
+
+        var top = 0
+        while top < sampleHeight / 2, rowIsBar(top) { top += 1 }
+        var bottom = sampleHeight - 1
+        while bottom > sampleHeight / 2, rowIsBar(bottom) { bottom -= 1 }
+        var left = 0
+        while left < sampleWidth / 2, columnIsBar(left) { left += 1 }
+        var right = sampleWidth - 1
+        while right > sampleWidth / 2, columnIsBar(right) { right -= 1 }
+
+        let normalized = CGRect(
+            x: CGFloat(left) / CGFloat(sampleWidth),
+            y: CGFloat(top) / CGFloat(sampleHeight),
+            width: CGFloat(right - left + 1) / CGFloat(sampleWidth),
+            height: CGFloat(bottom - top + 1) / CGFloat(sampleHeight)
+        )
+        guard normalized.width > 0.50, normalized.height > 0.50 else {
+            return CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        }
+
+        return CGRect(
+            x: normalized.minX * CGFloat(image.width),
+            y: normalized.minY * CGFloat(image.height),
+            width: normalized.width * CGFloat(image.width),
+            height: normalized.height * CGFloat(image.height)
+        )
+    }
+
     private func contentViewport(in image: CGImage) -> CGRect {
+        if Fixes.hardEdgeLetterbox {
+            return hardEdgeViewport(in: image)
+        }
         let sampleWidth = 256
         let sampleHeight = max(96, Int(
             (CGFloat(image.height) / CGFloat(max(image.width, 1))) * CGFloat(sampleWidth)
@@ -1312,6 +1847,12 @@ actor ScreenshotSpriteAnalyzer {
     }
 }
 
+enum PillKind {
+    case white
+    case black
+    case none
+}
+
 private struct GridLevelObservation {
     let level: Int
     let point: CGPoint
@@ -1329,12 +1870,14 @@ private struct CardFeature {
     let level: Int?
     let mastered: Bool
     let feature: VNFeaturePrintObservation
+    let colours: [Double]
 }
 
 private struct ReferenceFeature {
     let item: SpriteItem
     let catalogIndex: Int
     let feature: VNFeaturePrintObservation
+    let colours: [Double]
 }
 
 private struct DetailPanelMatch {
@@ -1347,6 +1890,7 @@ private struct DetailPanelMatch {
 private enum ScreenshotAnalysisError: LocalizedError {
     case unreadableImage
     case missingReferenceArtwork
+    case incompleteReferenceArtwork([String])
 
     var errorDescription: String? {
         switch self {
@@ -1354,6 +1898,11 @@ private enum ScreenshotAnalysisError: LocalizedError {
             return "That screenshot could not be opened as an image."
         case .missingReferenceArtwork:
             return "The built-in Sprite artwork could not be loaded for screenshot matching."
+        case .incompleteReferenceArtwork(let names):
+            let shown = names.prefix(5).joined(separator: ", ")
+            let more = names.count > 5 ? " and \(names.count - 5) more" : ""
+            return "Sprite artwork is missing for \(names.count) entries (\(shown)\(more)). "
+                + "Matching would be unreliable, so this scan was stopped."
         }
     }
 }
