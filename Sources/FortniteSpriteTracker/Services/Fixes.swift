@@ -15,6 +15,10 @@ enum Fixes {
     static let newCardGeometry = true
     static let hardEdgeLetterbox = true
     static let detectRowPhase = true
+    /// Measure the card grid from the picture instead of assuming the
+    /// letterbox-trimmed frame is the 16:9 game view. Lets a screen recording,
+    /// a windowed feed, or a bordered source align correctly.
+    static let detectGridFromContent = true
     static let absoluteSlotNumbering = true
     static let nativeResolutionAnalysis = true
 
@@ -59,7 +63,13 @@ enum GridMetrics {
 
     /// A locked card contains essentially no coloured pixels, whether it is
     /// dark (luma ~29) or selected and near-white (luma ~188).
-    static let lockedColourRatio: Double = 0.05
+    ///
+    /// Measured across the ground-truth captures: locked cards run 0.000–0.059
+    /// (the high end being a locked card sitting over bright background art),
+    /// while the least colourful *owned* card — a desaturated needs-summon tile
+    /// — is 0.358. The plan's 0.05 sat inside the locked range and let one leak
+    /// through as owned; 0.15 keeps a wide margin on both sides.
+    static let lockedColourRatio: Double = 0.15
 
     static func columnCentre(_ column: Int) -> CGFloat {
         firstColumnCentre + CGFloat(column) * columnStep

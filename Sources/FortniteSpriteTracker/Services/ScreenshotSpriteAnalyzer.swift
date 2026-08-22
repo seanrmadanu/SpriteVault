@@ -11,6 +11,11 @@ actor ScreenshotSpriteAnalyzer {
     private lazy var catalogByLongestName = catalog.sorted { $0.name.count > $1.name.count }
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private var cachedReferences: [ReferenceFeature]?
+    /// Vertical grid scale measured from the last analysed frame. Written by
+    /// `detectedRowTops` so the card rectangles use the pitch that was actually
+    /// found rather than one derived from an assumed aspect ratio.
+    private var measuredRowStep: CGFloat?
+    private var measuredCardHeight: CGFloat?
 
     // Normalized to the visible 16:9 Fortnite viewport. Letterboxing is removed
     // first by contentViewport(in:), so capture-card and Remote Play windows can
@@ -744,12 +749,28 @@ actor ScreenshotSpriteAnalyzer {
         let rowThreshold = viewport.height * 0.045
 
         // 1.3/1.4 — rows come from card edges, so a fully locked row keeps its
-        // place and slots stay at absolute grid positions.
+        // place and slots stay at absolute grid positions. Columns come from the
+        // picture too, so the grid does not depend on the outer framing being a
+        // clean 16:9 capture.
         if Fixes.detectRowPhase {
-            let tops = detectedRowTops(in: screenshot, viewport: viewport)
+            let columns = Fixes.detectGridFromContent
+                ? detectedColumns(in: screenshot, viewport: viewport)
+                : nil
+            measuredCardHeight = nil
+            measuredRowStep = nil
+            let tops = detectedRowTops(in: screenshot, viewport: viewport, columns: columns)
             if !tops.isEmpty {
-                let centres = (0..<GridMetrics.columnCount).map { column in
-                    viewport.minX + viewport.width * columnCentre(column)
+                let cardWidth = columns?.cardWidth ?? viewport.width * self.cardWidth
+                // Height comes from the measured row pitch, not from the card
+                // width via an assumed 16:9 source.
+                let cardHeight = measuredCardHeight
+                    ?? columns?.cardHeight
+                    ?? viewport.height * self.cardHeight
+                let centres = (0..<GridMetrics.columnCount).map { column -> CGFloat in
+                    if let columns {
+                        return columns.firstCentre + CGFloat(column) * columns.step
+                    }
+                    return viewport.minX + viewport.width * columnCentre(column)
                 }
                 var rects: [CGRect] = []
                 rects.reserveCapacity(tops.count * GridMetrics.columnCount)
@@ -863,6 +884,128 @@ actor ScreenshotSpriteAnalyzer {
         return GridLayout(rects: rects, levelsBySlot: levelsBySlot, isCalibrated: true)
     }
 
+    /// The three card columns, found from the picture itself.
+    ///
+    /// Everything else used to hang off the assumption that the letterbox-
+    /// trimmed frame *is* the 16:9 game picture. That holds for a clean capture
+    /// of the game, but not for a screen recording, a window with chrome, or a
+    /// feed with a border — and when it breaks, every card rectangle is wrong.
+    ///
+    /// The grid is strongly periodic, so find it directly: score candidate
+    /// (firstCentre, step) pairs by the vertical edge energy landing on the six
+    /// card borders, and take the best. Card width follows from the step, and
+    /// card height from the card's known aspect ratio, so the whole geometry is
+    /// derived from content with no dependence on the outer framing.
+    private func detectedColumns(in image: CGImage, viewport: CGRect) -> DetectedColumns? {
+        // Resolution here sets the precision of every card rectangle: at 480
+        // samples across a 2560-wide frame one sample is 5px, which is enough
+        // drift to slide the crown probe off the crown. Sample finely and search
+        // sub-sample.
+        let sampleWidth = 960
+        let bandTop = viewport.minY + viewport.height * 0.30
+        let bandHeight = viewport.height * 0.55
+        let band = CGRect(x: viewport.minX, y: bandTop, width: viewport.width, height: bandHeight)
+        guard let crop = cropTopLeft(image, to: band),
+              let pixels = downsampleRGBA(crop, width: sampleWidth, height: 64) else { return nil }
+
+        // Vertical edge energy per sampled column.
+        var energy = [Double](repeating: 0, count: sampleWidth)
+        for x in 2..<(sampleWidth - 2) {
+            var total = 0.0
+            for y in 0..<64 {
+                let a = (y * sampleWidth + x - 2) * 4
+                let b = (y * sampleWidth + x + 2) * 4
+                let lumA = Double(pixels[a]) * 0.30 + Double(pixels[a + 1]) * 0.59 + Double(pixels[a + 2]) * 0.11
+                let lumB = Double(pixels[b]) * 0.30 + Double(pixels[b + 1]) * 0.59 + Double(pixels[b + 2]) * 0.11
+                total += abs(lumB - lumA)
+            }
+            energy[x] = total / 64
+        }
+
+        let scale = viewport.width / CGFloat(sampleWidth)
+        // Card-width-to-step ratio is fixed by the game's layout.
+        let widthOverStep = GridMetrics.cardWidth / GridMetrics.columnStep
+
+        // Linear interpolation so the search is not quantised to whole samples.
+        func energyAt(_ position: Double) -> Double {
+            guard position >= 0, position < Double(sampleWidth - 1) else { return 0 }
+            let index = Int(position)
+            let fraction = position - Double(index)
+            return energy[index] * (1 - fraction) + energy[index + 1] * fraction
+        }
+
+        func score(centre: Double, step: Double) -> Double? {
+            let half = step * Double(widthOverStep) / 2
+            var total = 0.0
+            for column in 0..<GridMetrics.columnCount {
+                let c = centre + Double(column) * step
+                let left = c - half
+                let right = c + half
+                guard left >= 0, right < Double(sampleWidth - 1) else { return nil }
+                total += energyAt(left) + energyAt(right)
+            }
+            return total
+        }
+
+        var best: (centre: Double, step: Double, score: Double)?
+        let minimumStep = Double(sampleWidth) * 0.030
+        let maximumStep = Double(sampleWidth) * 0.180
+        let maximumCentre = Double(sampleWidth) * 0.55
+
+        // Coarse pass on whole samples, then refine around the winner.
+        var step = minimumStep
+        while step <= maximumStep {
+            var centre = step * Double(widthOverStep) / 2 + 1
+            while centre <= maximumCentre {
+                if let value = score(centre: centre, step: step), value > (best?.score ?? -1) {
+                    best = (centre, step, value)
+                }
+                centre += 1
+            }
+            step += 1
+        }
+        guard var refined = best else { return nil }
+
+        for granularity in [0.25, 0.05] {
+            var localBest = refined
+            var deltaStep = -1.5
+            while deltaStep <= 1.5 {
+                var deltaCentre = -1.5
+                while deltaCentre <= 1.5 {
+                    let candidateStep = refined.step + deltaStep
+                    let candidateCentre = refined.centre + deltaCentre
+                    if candidateStep > 0,
+                       let value = score(centre: candidateCentre, step: candidateStep),
+                       value > localBest.score {
+                        localBest = (candidateCentre, candidateStep, value)
+                    }
+                    deltaCentre += granularity
+                }
+                deltaStep += granularity
+            }
+            refined = localBest
+        }
+
+        guard refined.score > 0 else { return nil }
+
+        let stepPixels = refined.step * Double(scale)
+        let centrePixels = viewport.minX + CGFloat(refined.centre) * scale
+        let cardWidthPixels = stepPixels * Double(widthOverStep)
+        // Card aspect is fixed, so height comes from the measured width rather
+        // than from any assumption about the height of the picture.
+        let cardAspect = (GridMetrics.cardWidth * 16) / (GridMetrics.cardHeight * 9)
+        let cardHeightPixels = cardWidthPixels / Double(cardAspect)
+        let rowStepPixels = cardHeightPixels * Double(GridMetrics.rowStep / GridMetrics.cardHeight)
+
+        return DetectedColumns(
+            firstCentre: centrePixels,
+            step: CGFloat(stepPixels),
+            cardWidth: CGFloat(cardWidthPixels),
+            cardHeight: CGFloat(cardHeightPixels),
+            rowStep: CGFloat(rowStepPixels)
+        )
+    }
+
     /// Row phase from card edges instead of level text.
     ///
     /// Row spacing is a known constant; only the phase moves with scroll. Card
@@ -870,29 +1013,41 @@ actor ScreenshotSpriteAnalyzer {
     /// correlating a comb of that period against per-scanline edge energy finds
     /// the phase without needing any card to be readable. A row of entirely
     /// locked cards no longer drops out and shifts every slot below it.
-    private func detectedRowTops(in image: CGImage, viewport: CGRect) -> [CGFloat] {
-        let step = viewport.height * rowStep
-        let card = viewport.height * cardHeight
-        guard step > 4, card > 4 else { return [] }
+    private func detectedRowTops(
+        in image: CGImage,
+        viewport: CGRect,
+        columns: DetectedColumns?
+    ) -> [CGFloat] {
+        let fallbackStep = viewport.height * rowStep
+        let fallbackCard = viewport.height * cardHeight
+        guard fallbackStep > 4 || (columns?.rowStep ?? 0) > 4 else { return [] }
 
         let bandTop = viewport.minY + viewport.height * 0.20
         let bandBottom = viewport.minY + viewport.height * 0.97
-        guard bandBottom - bandTop > card else { return [] }
-
-        // Sample the three card columns at reduced width; only vertical
-        // structure matters, so a narrow strip per column is enough.
-        let stripWidth = 48
         let bandHeight = Int(bandBottom - bandTop)
         guard bandHeight > 8 else { return [] }
 
+        // Sample the three card columns at reduced width; only vertical
+        // structure matters, so a narrow strip per column is enough. Use the
+        // measured column positions when we have them — sampling the wrong
+        // strips would measure the background instead of the cards.
+        let stripWidth = 48
         var energy = [Double](repeating: 0, count: bandHeight)
         var sampled = false
         for column in 0..<GridMetrics.columnCount {
-            let centre = viewport.minX + viewport.width * columnCentre(column)
+            let centre: CGFloat
+            let width: CGFloat
+            if let columns {
+                centre = columns.firstCentre + CGFloat(column) * columns.step
+                width = columns.cardWidth
+            } else {
+                centre = viewport.minX + viewport.width * columnCentre(column)
+                width = viewport.width * cardWidth
+            }
             let rect = CGRect(
-                x: centre - viewport.width * cardWidth / 2,
+                x: centre - width / 2,
                 y: bandTop,
-                width: viewport.width * cardWidth,
+                width: width,
                 height: CGFloat(bandHeight)
             )
             guard let strip = cropTopLeft(image, to: rect),
@@ -917,32 +1072,81 @@ actor ScreenshotSpriteAnalyzer {
         }
         guard sampled else { return [] }
 
-        // Score every whole-pixel phase by the energy landing on the card top
-        // and bottom lines of every row that phase implies.
-        var bestPhase = 0.0
-        var bestScore = -1.0
-        var phase = 0.0
-        while phase < step {
-            var score = 0.0
+        // Search the row period around its expected value as well as the phase.
+        //
+        // Pixels are square in every source that matters here — a recording or a
+        // resized window scales both axes together — so the measured column
+        // pitch predicts the row pitch. The search only has to absorb small
+        // error, and the range is kept tight on purpose: shot3-style pages are
+        // mostly locked cards with weak edges, and given a wide range a sparse
+        // long period can score better than the true one.
+        let cardOverStep = Double(GridMetrics.cardHeight / GridMetrics.rowStep)
+        let stepOverCardWidth = Double((GridMetrics.rowStep * 9) / (GridMetrics.cardWidth * 16))
+        let estimate = columns.map { Double($0.cardWidth) * stepOverCardWidth }
+            ?? Double(fallbackStep)
+        let minimumStep = max(8.0, estimate * 0.88)
+        let maximumStep = min(Double(bandHeight) / 2, estimate * 1.14)
+        guard maximumStep > minimumStep else { return [] }
+
+        func score(step: Double, phase: Double) -> Double {
+            let card = step * cardOverStep
+            var total = 0.0
+            var rows = 0
             var y = phase
             while y + card < Double(bandHeight) {
-                score += energy[Int(y)]
-                score += energy[Int(y + card)]
+                total += energy[Int(y)] + energy[Int(y + card)]
+                rows += 1
                 y += step
             }
-            if score > bestScore {
-                bestScore = score
-                bestPhase = phase
-            }
-            phase += 1
+            // Normalise by row count so a short period is not favoured purely
+            // for fitting more rows into the band.
+            return rows > 0 ? total / Double(rows) : 0
         }
-        guard bestScore > 0 else { return [] }
+
+        var best = (step: estimate, phase: 0.0, score: -1.0)
+        var step = minimumStep
+        while step <= maximumStep {
+            var phase = 0.0
+            while phase < step {
+                let value = score(step: step, phase: phase)
+                if value > best.score { best = (step, phase, value) }
+                phase += 1
+            }
+            step += 1
+        }
+        guard best.score > 0 else { return [] }
+
+        // Refine both together at sub-pixel resolution.
+        for granularity in [0.25, 0.05] {
+            var localBest = best
+            var deltaStep = -1.5
+            while deltaStep <= 1.5 {
+                var deltaPhase = -1.5
+                while deltaPhase <= 1.5 {
+                    let candidateStep = best.step + deltaStep
+                    let candidatePhase = best.phase + deltaPhase
+                    if candidateStep > 8, candidatePhase >= 0 {
+                        let value = score(step: candidateStep, phase: candidatePhase)
+                        if value > localBest.score {
+                            localBest = (candidateStep, candidatePhase, value)
+                        }
+                    }
+                    deltaPhase += granularity
+                }
+                deltaStep += granularity
+            }
+            best = localBest
+        }
+
+        let card = best.step * cardOverStep
+        measuredRowStep = CGFloat(best.step)
+        measuredCardHeight = CGFloat(card)
 
         var tops: [CGFloat] = []
-        var y = bestPhase
+        var y = best.phase
         while y + card <= Double(bandHeight) {
             tops.append(bandTop + CGFloat(y))
-            y += step
+            y += best.step
         }
         return tops
     }
@@ -964,9 +1168,13 @@ actor ScreenshotSpriteAnalyzer {
         return GridLayout(rects: rects, levelsBySlot: levelsBySlot, isCalibrated: false)
     }
 
-    /// Fortnite exposes four complete rows at the absolute top and bottom of
-    /// the catalog. In the middle, clipped edge rows are ignored and only the
-    /// three rows nearest the viewport center receive overlays.
+    /// Which slots the overlay should cover.
+    ///
+    /// Once the grid is measured from the picture, every row that is *fully*
+    /// on screen is fair game — the lattice simply grows and shrinks with the
+    /// number of complete rows visible. Only rows clipped by the top divider or
+    /// the Sprite Dust bar are dropped, because a half-height card yields a
+    /// half-height crop and a meaningless match.
     private func selectedVisibleSlots(
         from rects: [CGRect],
         viewport: CGRect,
@@ -975,6 +1183,22 @@ actor ScreenshotSpriteAnalyzer {
         guard !rects.isEmpty else { return [] }
         let rowCount = Int(ceil(Double(rects.count) / 3.0))
         let rows = Array(0..<rowCount)
+
+        if Fixes.detectGridFromContent {
+            // The grid sits between the tab divider and the Sprite Dust bar.
+            let gridTop = viewport.minY + viewport.height * 0.225
+            let gridBottom = viewport.minY + viewport.height * 0.885
+            let fullyVisible = rows.filter { row in
+                let index = min(row * 3, rects.count - 1)
+                let rect = rects[index]
+                return rect.minY >= gridTop && rect.maxY <= gridBottom
+            }
+            if !fullyVisible.isEmpty {
+                let allowed = Set(fullyVisible)
+                return Set(rects.indices.filter { allowed.contains($0 / 3) })
+            }
+        }
+
         guard rowCount > 3 else { return Set(rects.indices) }
 
         let isAtTop = pageStart == 0
@@ -1377,15 +1601,25 @@ actor ScreenshotSpriteAnalyzer {
 
     private func referenceArtworkImage(from image: CGImage) -> CGImage? {
         let source = CIImage(cgImage: image)
-        // 2.2 — real cards sit on a pale lilac-tinted tile, not near-white, and
-        // the artwork occupies the upper part of the card with a margin around
-        // it. Match that framing so the reference and the crop are alike.
-        let backgroundColour = Fixes.cardLikeReferences
-            ? CIColor(red: 0.84, green: 0.85, blue: 0.90, alpha: 1)
-            : CIColor(red: 0.90, green: 0.92, blue: 0.95, alpha: 1)
-        let background = CIImage(color: backgroundColour).cropped(to: source.extent)
-        let composited = source.composited(over: background)
-        return ciContext.createCGImage(composited, from: source.extent)
+
+        guard Fixes.cardLikeReferences else {
+            let background = CIImage(color: CIColor(red: 0.90, green: 0.92, blue: 0.95, alpha: 1))
+                .cropped(to: source.extent)
+            return ciContext.createCGImage(source.composited(over: background), from: source.extent)
+        }
+
+        // 2.2 — real cards sit on a pale lilac-tinted tile rather than the
+        // near-white this used to composite onto, which matters now that colour
+        // is part of the score.
+        //
+        // Re-framing the reference to match `artworkCrop`'s aspect ratio and
+        // padding was tried as well and measurably hurt: distances rose across
+        // the board and margins narrowed enough to lose two correct matches. The
+        // source PNGs are already framed close to how the game draws them, so
+        // they are composited at their own extent.
+        let background = CIImage(color: CIColor(red: 0.84, green: 0.85, blue: 0.90, alpha: 1))
+            .cropped(to: source.extent)
+        return ciContext.createCGImage(source.composited(over: background), from: source.extent)
     }
 
     /// Coarse hue/saturation histogram over the artwork.
@@ -1851,6 +2085,15 @@ enum PillKind {
     case white
     case black
     case none
+}
+
+/// Grid geometry measured from the picture, in pixels of the source frame.
+struct DetectedColumns {
+    let firstCentre: CGFloat
+    let step: CGFloat
+    let cardWidth: CGFloat
+    let cardHeight: CGFloat
+    let rowStep: CGFloat
 }
 
 private struct GridLevelObservation {

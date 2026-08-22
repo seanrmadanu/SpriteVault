@@ -743,26 +743,62 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         let height = CVPixelBufferGetHeight(pixelBuffer)
         let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
         let pointer = base.assumingMemoryBound(to: UInt8.self)
-        let regions: [(Double, Double, Double, Double)] = [
-            (0.055, 0.205, 0.285, 0.690), // left 3-column collection grid
-            (0.655, 0.455, 0.285, 0.270)  // selected Sprite details
-        ]
-        let samplesX = 12
-        let samplesY = 10
-        var output: [UInt8] = []
-        output.reserveCapacity(regions.count * samplesX * samplesY)
 
-        for region in regions {
-            for sy in 0..<samplesY {
-                for sx in 0..<samplesX {
-                    let nx = region.0 + region.2 * (Double(sx) + 0.5) / Double(samplesX)
-                    let ny = region.1 + region.3 * (Double(sy) + 0.5) / Double(samplesY)
-                    let x = min(max(Int(nx * Double(width)), 0), width - 1)
-                    let y = min(max(Int(ny * Double(height)), 0), height - 1)
-                    let p = pointer + y * rowBytes + x * 4
-                    let b = Int(p[0]), g = Int(p[1]), r = Int(p[2])
-                    output.append(UInt8(clamping: (r * 30 + g * 59 + b * 11) / 100))
-                }
+        @inline(__always) func luma(_ x: Int, _ y: Int) -> Int {
+            let p = pointer + y * rowBytes + x * 4
+            return (Int(p[2]) * 30 + Int(p[1]) * 59 + Int(p[0]) * 11) / 100
+        }
+
+        // 1.7 — sample the letterbox-trimmed picture, not the raw window.
+        // These used to be fractions of whatever the capture happened to be, so
+        // any framing other than a clean fullscreen game — a windowed feed, a
+        // recording played back in a player — pointed them at the wrong pixels.
+        var left = 0, right = width - 1, top = 0, bottom = height - 1
+        func columnIsBar(_ x: Int) -> Bool {
+            var bright = 0
+            var samples = 0
+            for y in stride(from: 0, to: height, by: max(1, height / 64)) {
+                if luma(x, y) > 40 { bright += 1 }
+                samples += 1
+            }
+            return samples > 0 && Double(bright) / Double(samples) < 0.02
+        }
+        func rowIsBar(_ y: Int) -> Bool {
+            var bright = 0
+            var samples = 0
+            for x in stride(from: 0, to: width, by: max(1, width / 64)) {
+                if luma(x, y) > 40 { bright += 1 }
+                samples += 1
+            }
+            return samples > 0 && Double(bright) / Double(samples) < 0.02
+        }
+        while left < width / 3, columnIsBar(left) { left += 1 }
+        while right > 2 * width / 3, columnIsBar(right) { right -= 1 }
+        while top < height / 3, rowIsBar(top) { top += 1 }
+        while bottom > 2 * height / 3, rowIsBar(bottom) { bottom -= 1 }
+
+        let contentWidth = Double(right - left + 1)
+        let contentHeight = Double(bottom - top + 1)
+        guard contentWidth > 32, contentHeight > 32 else { return nil }
+
+        // Watch only the card grid. The detail panel used to be sampled too, but
+        // it renders a continuously animating 3D Sprite, so a frame containing it
+        // never settles — the scan sat on "tracking scroll" forever and never
+        // produced anchors. Scroll position is what we actually need to detect,
+        // and the grid alone shows that.
+        let region = (x: 0.045, y: 0.20, width: 0.32, height: 0.72)
+        let samplesX = 16
+        let samplesY = 14
+        var output: [UInt8] = []
+        output.reserveCapacity(samplesX * samplesY)
+
+        for sy in 0..<samplesY {
+            for sx in 0..<samplesX {
+                let nx = region.x + region.width * (Double(sx) + 0.5) / Double(samplesX)
+                let ny = region.y + region.height * (Double(sy) + 0.5) / Double(samplesY)
+                let x = min(max(left + Int(nx * contentWidth), 0), width - 1)
+                let y = min(max(top + Int(ny * contentHeight), 0), height - 1)
+                output.append(UInt8(clamping: luma(x, y)))
             }
         }
         return output
