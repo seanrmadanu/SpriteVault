@@ -16,6 +16,10 @@ actor ScreenshotSpriteAnalyzer {
     /// found rather than one derived from an assumed aspect ratio.
     private var measuredRowStep: CGFloat?
     private var measuredCardHeight: CGFloat?
+    /// Y of the white rule under the filter row, when it was found this frame.
+    private var measuredDividerY: CGFloat?
+    private var measuredDustBarY: CGFloat?
+    private var measuredColumns: DetectedColumns?
 
     // Normalized to the visible 16:9 Fortnite viewport. Letterboxing is removed
     // first by contentViewport(in:), so capture-card and Remote Play windows can
@@ -120,7 +124,8 @@ actor ScreenshotSpriteAnalyzer {
         let provisionalVisibleSlots = selectedVisibleSlots(
             from: cardRects,
             viewport: viewport,
-            pageStart: provisionalPageStart
+            pageStart: provisionalPageStart,
+            dividerY: measuredDividerY
         )
         if grid.isCalibrated {
             let provisionalAnchors: [SpriteCardAnchor] = cardRects.enumerated().compactMap { slot, rect -> SpriteCardAnchor? in
@@ -342,7 +347,8 @@ actor ScreenshotSpriteAnalyzer {
         let visibleSlotSet = selectedVisibleSlots(
             from: cardRects,
             viewport: viewport,
-            pageStart: pageStart
+            pageStart: pageStart,
+            dividerY: measuredDividerY
         )
         let displayedDetections = unique.filter { detection in
             guard let slot = detection.gridSlot else { return true }
@@ -399,7 +405,8 @@ actor ScreenshotSpriteAnalyzer {
             lockedSlots: lockedSlots,
             needsHelpSlots: needsHelpSlots,
             selectedSpriteName: selectedSpriteName,
-            cardAnchors: anchors
+            cardAnchors: anchors,
+            gridFrame: referenceGridFrame(in: screenshot, viewport: viewport)
         )
     }
 
@@ -777,7 +784,19 @@ actor ScreenshotSpriteAnalyzer {
                 : nil
             measuredCardHeight = nil
             measuredRowStep = nil
-            let tops = detectedRowTops(in: screenshot, viewport: viewport, columns: columns)
+            measuredDividerY = nil
+            measuredDustBarY = nil
+            measuredColumns = nil
+            let dividerY = detectedDividerY(in: screenshot, viewport: viewport)
+            measuredDividerY = dividerY
+            measuredDustBarY = detectedDustBarY(in: screenshot, viewport: viewport)
+            measuredColumns = columns
+            let tops = detectedRowTops(
+                in: screenshot,
+                viewport: viewport,
+                columns: columns,
+                dividerY: dividerY
+            )
             if !tops.isEmpty {
                 let cardWidth = columns?.cardWidth ?? viewport.width * self.cardWidth
                 // Height comes from the measured row pitch, not from the card
@@ -1025,6 +1044,131 @@ actor ScreenshotSpriteAnalyzer {
         )
     }
 
+    /// The solid white rule under the ALL / filter row, which caps the grid.
+    ///
+    /// This is the most dependable landmark on the screen: measured across every
+    /// ground-truth capture it sits at 0.2147 of the picture height, within
+    /// 0.0002. Reading it directly beats deriving the grid's top edge from the
+    /// viewport, and it corrects the viewport if the underline anchor drifted.
+    ///
+    /// Note what it cannot do: it is *static* while the cards scroll behind it,
+    /// so it bounds the visible window but says nothing about row phase. Phase
+    /// still has to come from the card edges themselves.
+    private func detectedDividerY(in image: CGImage, viewport: CGRect) -> CGFloat? {
+        let searchTop = viewport.minY + viewport.height * 0.12
+        let searchHeight = viewport.height * 0.24
+        let rect = CGRect(
+            x: viewport.minX + viewport.width * 0.06,
+            y: searchTop,
+            width: viewport.width * 0.24,
+            height: searchHeight
+        )
+        let sampleWidth = 120
+        let sampleHeight = max(24, Int(searchHeight / 2))
+        guard let crop = cropTopLeft(image, to: rect),
+              let pixels = downsampleRGBA(crop, width: sampleWidth, height: sampleHeight) else {
+            return nil
+        }
+
+        var bestRow = -1
+        var bestRatio = 0.0
+        for y in 0..<sampleHeight {
+            var bright = 0
+            for x in 0..<sampleWidth {
+                let offset = (y * sampleWidth + x) * 4
+                let r = Int(pixels[offset])
+                let g = Int(pixels[offset + 1])
+                let b = Int(pixels[offset + 2])
+                let maximum = max(r, max(g, b))
+                let minimum = min(r, min(g, b))
+                if maximum > 200, maximum - minimum < 45 { bright += 1 }
+            }
+            let ratio = Double(bright) / Double(sampleWidth)
+            if ratio > bestRatio {
+                bestRatio = ratio
+                bestRow = y
+            }
+        }
+        // A real rule is essentially solid across the grid width.
+        guard bestRow >= 0, bestRatio >= 0.80 else { return nil }
+        return searchTop + (CGFloat(bestRow) + 0.5) * (searchHeight / CGFloat(sampleHeight))
+    }
+
+    /// The grid's outer frame, built from chrome that does not scroll.
+    ///
+    /// Columns come from the measured card grid, the top from the rule under the
+    /// filter row, the bottom from the Sprite Dust bar. None of those move while
+    /// the collection scrolls, so the frame stays put and only the lattice
+    /// inside it has to track the cards.
+    private func referenceGridFrame(in image: CGImage, viewport: CGRect) -> CGRect? {
+        guard let columns = measuredColumns else { return nil }
+        let half = columns.cardWidth / 2
+        let left = columns.firstCentre - half
+        let right = columns.firstCentre + CGFloat(GridMetrics.columnCount - 1) * columns.step + half
+        let top = measuredDividerY ?? (viewport.minY + viewport.height * 0.215)
+        // The party-chat pills under the Sprite Dust bar are blue too and sit
+        // flush against it, so a run scanned up from the bottom can swallow them
+        // and put the frame below the grid. Clamp to where the grid can end.
+        let bottomLimit = viewport.minY + viewport.height * 0.90
+        let bottom = min(measuredDustBarY ?? bottomLimit, bottomLimit)
+        guard right > left, bottom > top else { return nil }
+
+        let width = max(CGFloat(image.width), 1)
+        let height = max(CGFloat(image.height), 1)
+        return CGRect(
+            x: left / width,
+            y: top / height,
+            width: (right - left) / width,
+            height: (bottom - top) / height
+        )
+    }
+
+    /// Top edge of the SPRITE DUST bar, which closes the grid at the bottom.
+    ///
+    /// Scanned upward from the bottom. Searching downward finds the first
+    /// blue-ish thing instead, and plenty of Sprite cards are blue — that read
+    /// 0.79 of the picture on one capture where the true bar is at 0.88.
+    private func detectedDustBarY(in image: CGImage, viewport: CGRect) -> CGFloat? {
+        let searchTop = viewport.minY + viewport.height * 0.70
+        let searchHeight = viewport.maxY - searchTop
+        guard searchHeight > 8 else { return nil }
+        let rect = CGRect(
+            x: viewport.minX + viewport.width * 0.06,
+            y: searchTop,
+            width: viewport.width * 0.24,
+            height: searchHeight
+        )
+        let sampleWidth = 120
+        let sampleHeight = max(24, Int(searchHeight / 2))
+        guard let crop = cropTopLeft(image, to: rect),
+              let pixels = downsampleRGBA(crop, width: sampleWidth, height: sampleHeight) else {
+            return nil
+        }
+
+        func isDustRow(_ y: Int) -> Bool {
+            var matches = 0
+            for x in 0..<sampleWidth {
+                let offset = (y * sampleWidth + x) * 4
+                let r = Int(pixels[offset])
+                let g = Int(pixels[offset + 1])
+                let b = Int(pixels[offset + 2])
+                if b > 110, b > r + 25, b > g + 15 { matches += 1 }
+            }
+            return Double(matches) / Double(sampleWidth) > 0.70
+        }
+
+        // Walk up through the contiguous bar sitting at the bottom.
+        var y = sampleHeight - 1
+        while y >= 0, !isDustRow(y) { y -= 1 }
+        guard y >= 0 else { return nil }
+        var top = y
+        while top - 1 >= 0, isDustRow(top - 1) { top -= 1 }
+        // A stray blue card is not a bar; require real thickness.
+        guard y - top >= 3 else { return nil }
+
+        return searchTop + CGFloat(top) * (searchHeight / CGFloat(sampleHeight))
+    }
+
     /// Row phase from card edges instead of level text.
     ///
     /// Row spacing is a known constant; only the phase moves with scroll. Card
@@ -1035,13 +1179,17 @@ actor ScreenshotSpriteAnalyzer {
     private func detectedRowTops(
         in image: CGImage,
         viewport: CGRect,
-        columns: DetectedColumns?
+        columns: DetectedColumns?,
+        dividerY: CGFloat?
     ) -> [CGFloat] {
         let fallbackStep = viewport.height * rowStep
         let fallbackCard = viewport.height * cardHeight
         guard fallbackStep > 4 || (columns?.rowStep ?? 0) > 4 else { return [] }
 
-        let bandTop = viewport.minY + viewport.height * 0.20
+        // Start the search at the measured divider when we can see it, so a
+        // small viewport error does not shift the whole search window.
+        let bandTop = (dividerY.map { $0 - viewport.height * 0.02 })
+            ?? (viewport.minY + viewport.height * 0.20)
         let bandBottom = viewport.minY + viewport.height * 0.97
         let bandHeight = Int(bandBottom - bandTop)
         guard bandHeight > 8 else { return [] }
@@ -1206,7 +1354,8 @@ actor ScreenshotSpriteAnalyzer {
     private func selectedVisibleSlots(
         from rects: [CGRect],
         viewport: CGRect,
-        pageStart: Int?
+        pageStart: Int?,
+        dividerY: CGFloat? = nil
     ) -> Set<Int> {
         guard !rects.isEmpty else { return [] }
         let rowCount = Int(ceil(Double(rects.count) / 3.0))
@@ -1214,7 +1363,7 @@ actor ScreenshotSpriteAnalyzer {
 
         if Fixes.detectGridFromContent {
             // The grid sits between the tab divider and the Sprite Dust bar.
-            let gridTop = viewport.minY + viewport.height * 0.225
+            let gridTop = dividerY ?? (viewport.minY + viewport.height * 0.225)
             let gridBottom = viewport.minY + viewport.height * 0.885
             let fullyVisible = rows.filter { row in
                 let index = min(row * 3, rects.count - 1)

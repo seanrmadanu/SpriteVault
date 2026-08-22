@@ -25,6 +25,9 @@ enum Fixes {
     static let detectGridFromContent = true
     static let absoluteSlotNumbering = true
     static let nativeResolutionAnalysis = true
+    /// Warn when the capture buffer and the overlay panel disagree in aspect,
+    /// which offsets every drawn box even though the geometry is correct.
+    static let logCaptureAlignment = true
 
     // Stage 2 — identification
     static let colourMatching = true

@@ -443,6 +443,21 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
                 }
             }
 
+            // The overlay maps analyzer coordinates, which are normalized to
+            // this buffer, onto the panel rect. If the two disagree in aspect
+            // the drawing is offset even when the geometry is correct, so make
+            // the discrepancy visible rather than silent.
+            if let overlayRect = self.selectedOverlayRect, Fixes.logCaptureAlignment {
+                let imageAspect = Double(cgImage.width) / Double(max(cgImage.height, 1))
+                let panelAspect = Double(overlayRect.width) / Double(max(overlayRect.height, 1))
+                if abs(imageAspect - panelAspect) > 0.01 {
+                    print("[capture] MISMATCH image \(cgImage.width)x\(cgImage.height) "
+                          + "(aspect \(String(format: "%.4f", imageAspect))) vs panel "
+                          + "\(Int(overlayRect.width))x\(Int(overlayRect.height)) "
+                          + "(aspect \(String(format: "%.4f", panelAspect)))")
+                }
+            }
+
             do {
                 let analysis = try await ScreenshotSpriteAnalyzer.shared.analyzeFrame(
                     image: cgImage,
@@ -589,13 +604,26 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         let sourceSize = filter.contentRect.size
         let nativeWidth = max(sourceSize.width * pixelScale, 1)
         let nativeHeight = max(sourceSize.height * pixelScale, 1)
-        // 1280 px is enough for the Fortnite card grid/right-panel OCR while
-        // substantially reducing Core Image + Vision work on Retina displays.
-        let outputWidth = min(nativeWidth, 1280)
-        let scale = outputWidth / nativeWidth
-        configuration.width = max(Int(outputWidth.rounded()), 2)
-        configuration.height = max(Int((nativeHeight * scale).rounded()), 2)
-        configuration.scalesToFit = true
+
+        // 1.5 — capture at native resolution. This used to cap the output at
+        // 1280px wide, which halves a 2560-wide source and destroys the "Lvl N"
+        // text, the smallest thing that has to be read.
+        //
+        // scalesToFit is off, and the output keeps the source aspect exactly.
+        // With it on, any aspect difference makes ScreenCaptureKit letterbox
+        // *inside* the buffer: the analyzer treats that padding as picture and
+        // normalizes card positions against it, while the overlay panel is
+        // placed on the unpadded window rect — so every drawn box sits off by
+        // the padding even though the geometry was right.
+        let maximumWidth: CGFloat = 3840
+        let scale = min(1, maximumWidth / nativeWidth)
+        let width = max(Int((nativeWidth * scale).rounded()), 2)
+        // Derive height from the rounded width so the stored aspect matches the
+        // buffer's actual aspect rather than the pre-rounding one.
+        let height = max(Int((CGFloat(width) * nativeHeight / nativeWidth).rounded()), 2)
+        configuration.width = width
+        configuration.height = height
+        configuration.scalesToFit = false
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         return configuration
     }
@@ -878,6 +906,20 @@ private struct RememberedOverlayState {
     let state: SpriteOverlayCardState
 }
 
+/// A panel that keeps exactly the frame it is given.
+///
+/// `NSWindow` normally constrains a frame to the screen's *visible* area, so a
+/// panel asked to cover the whole screen gets pushed below the menu bar and
+/// shortened. The overlay maps analyzer coordinates onto its own bounds, so a
+/// silently shrunk panel shifts every line down by the menu bar height — the
+/// geometry is right and the drawing is still wrong. Opting out of constraining
+/// is what makes the panel's bounds mean what the capture means.
+private final class SpriteOverlayPanel: NSPanel {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+}
+
 // AppKit overlay state is touched on the main thread. ScreenCaptureKit invokes
 // its owner from a sample queue, so the controller is explicitly synchronized.
 private final class SpriteScanOverlayController: @unchecked Sendable {
@@ -907,12 +949,13 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         if let panel {
             panel.setFrame(usableFrame, display: true)
             panel.orderFrontRegardless()
+            Self.warnIfConstrained(panel: panel, requested: usableFrame)
             startHoverTracking()
             startAnimationTimer()
             return
         }
 
-        let panel = NSPanel(
+        let panel = SpriteOverlayPanel(
             contentRect: usableFrame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -938,8 +981,25 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         self.panel = panel
         self.overlayView = view
         panel.orderFrontRegardless()
+        Self.warnIfConstrained(panel: panel, requested: usableFrame)
         startHoverTracking()
         startAnimationTimer()
+    }
+
+    /// The overlay is only correct while its bounds match the rect the capture
+    /// covers. Say so loudly if AppKit moved or resized it anyway.
+    private static func warnIfConstrained(panel: NSPanel, requested: CGRect) {
+        guard Fixes.logCaptureAlignment else { return }
+        let actual = panel.frame
+        let dx = abs(actual.minX - requested.minX)
+        let dy = abs(actual.minY - requested.minY)
+        let dw = abs(actual.width - requested.width)
+        let dh = abs(actual.height - requested.height)
+        guard dx > 0.5 || dy > 0.5 || dw > 0.5 || dh > 0.5 else { return }
+        print("[overlay] panel CONSTRAINED: asked "
+              + "\(Int(requested.minX)),\(Int(requested.minY)) \(Int(requested.width))x\(Int(requested.height))"
+              + " got \(Int(actual.minX)),\(Int(actual.minY)) \(Int(actual.width))x\(Int(actual.height))"
+              + "  (dx \(Int(dx)) dy \(Int(dy)) dw \(Int(dw)) dh \(Int(dh)))")
     }
 
     func hide() {
@@ -1045,6 +1105,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
 
         let anchors = analysis.cardAnchors.sorted { $0.slot < $1.slot }
         view.cardAnchors = anchors
+        view.gridFrame = analysis.gridFrame
 
         guard !anchors.isEmpty else {
             view.mode = .waiting
@@ -1252,6 +1313,8 @@ private final class SpriteScanOverlayView: NSView {
     var spritesRead = 0
     var newThisSession = 0
     var sessionStartedAt: Date?
+    /// Static outer frame of the grid, normalized top-left.
+    var gridFrame: CGRect?
 
     private let magenta = NSColor(calibratedRed: 1.0, green: 0.10, blue: 0.72, alpha: 1.0)
 
@@ -1330,9 +1393,6 @@ private final class SpriteScanOverlayView: NSView {
         guard let left = columnBands.first?.min, let right = columnBands.last?.max,
               let top = rowBands.first?.max, let bottom = rowBands.last?.min else { return }
 
-        let lattice = NSColor(calibratedRed: 0.35, green: 0.95, blue: 1.0, alpha: 0.85)
-        lattice.setStroke()
-
         func line(from a: CGPoint, to b: CGPoint, width: CGFloat) {
             let path = NSBezierPath()
             path.move(to: a)
@@ -1341,7 +1401,25 @@ private final class SpriteScanOverlayView: NSView {
             path.stroke()
         }
 
-        // Outer bounds, then a line down the centre of every gutter.
+        // The reference frame is anchored to chrome that does not scroll, so it
+        // holds still even while the cards move behind it.
+        if let frame = gridFrame {
+            let rect = CGRect(
+                x: bounds.minX + bounds.width * frame.minX,
+                y: bounds.maxY - bounds.height * frame.maxY,
+                width: bounds.width * frame.width,
+                height: bounds.height * frame.height
+            )
+            NSColor(calibratedWhite: 0.80, alpha: 0.85).setStroke()
+            let path = NSBezierPath(rect: rect)
+            path.lineWidth = 2.0
+            path.stroke()
+        }
+
+        let lattice = NSColor(calibratedRed: 0.35, green: 0.95, blue: 1.0, alpha: 0.90)
+        lattice.setStroke()
+
+        // Lattice: outer bounds of the cards, then a line down every gutter.
         line(from: CGPoint(x: left, y: top), to: CGPoint(x: right, y: top), width: 1.5)
         line(from: CGPoint(x: left, y: bottom), to: CGPoint(x: right, y: bottom), width: 1.5)
         line(from: CGPoint(x: left, y: top), to: CGPoint(x: left, y: bottom), width: 1.5)
@@ -1374,26 +1452,31 @@ private final class SpriteScanOverlayView: NSView {
     }
 
     private func drawState(_ state: SpriteOverlayCardState, in card: CGRect, slot: Int) {
-        let badgeText: String
+        // A recognised card gets a green tick in the middle with its name under
+        // it — readable at a glance without hunting for a corner badge. Level and
+        // crown stay in the corner where they do not crowd the name.
         switch state {
         case .processing:
-            badgeText = String(repeating: "•", count: processingPhase + 1)
-        case let .recognized(_, level, mastered):
-            badgeText = "👍\(level.map { " L\($0)" } ?? "")\(mastered ? " 👑" : "")"
-        case let .needsHelp(prompt):
-            badgeText = prompt ? "👎 SELECT" : "👎"
-        case .locked:
-            badgeText = "🔒"
-        case let .lost(_, level, mastered):
-            badgeText = "SUMMON\(level.map { " L\($0)" } ?? "")\(mastered ? " 👑" : "")"
-        }
-        drawBadge(text: badgeText, in: card)
-
-        switch state {
-        case let .recognized(name, _, _), let .lost(name, _, _):
+            drawCentreMark(String(repeating: "•", count: processingPhase + 1),
+                           colour: NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.25, alpha: 1),
+                           in: card)
+        case let .recognized(name, level, mastered):
+            drawCentreMark("✓", colour: NSColor(calibratedRed: 0.25, green: 0.92, blue: 0.45, alpha: 1), in: card)
             drawName(name, in: card)
-        default:
-            break
+            let corner = "\(level.map { "L\($0)" } ?? "")\(mastered ? " 👑" : "")"
+            if !corner.trimmingCharacters(in: .whitespaces).isEmpty {
+                drawBadge(text: corner, in: card)
+            }
+        case let .lost(name, level, mastered):
+            drawCentreMark("↻", colour: NSColor(calibratedRed: 1.0, green: 0.78, blue: 0.30, alpha: 1), in: card)
+            drawName(name, in: card)
+            let corner = "SUMMON\(level.map { " L\($0)" } ?? "")\(mastered ? " 👑" : "")"
+            drawBadge(text: corner, in: card)
+        case let .needsHelp(prompt):
+            drawCentreMark("?", colour: NSColor(calibratedRed: 1.0, green: 0.62, blue: 0.25, alpha: 1), in: card)
+            if prompt { drawBadge(text: "SELECT", in: card) }
+        case .locked:
+            drawCentreMark("🔒", colour: NSColor(calibratedWhite: 0.75, alpha: 1), in: card)
         }
 
         if case .needsHelp = state, hoveredSlot == slot {
@@ -1418,6 +1501,35 @@ private final class SpriteScanOverlayView: NSView {
         NSColor.black.withAlphaComponent(0.78).setFill()
         NSBezierPath(roundedRect: badge, xRadius: badge.height / 2, yRadius: badge.height / 2).fill()
         text.draw(at: CGPoint(x: badge.minX + 5, y: badge.minY + 3), withAttributes: attributes)
+    }
+
+    /// A single glyph centred in the cell, on a dark disc so it reads over any
+    /// artwork underneath.
+    private func drawCentreMark(_ glyph: String, colour: NSColor, in card: CGRect) {
+        let diameter = min(card.width, card.height) * 0.38
+        guard diameter >= 12 else { return }
+        let circle = CGRect(
+            x: card.midX - diameter / 2,
+            y: card.midY - diameter / 2 + card.height * 0.06,
+            width: diameter,
+            height: diameter
+        )
+        NSColor.black.withAlphaComponent(0.62).setFill()
+        NSBezierPath(ovalIn: circle).fill()
+        colour.withAlphaComponent(0.95).setStroke()
+        let ring = NSBezierPath(ovalIn: circle.insetBy(dx: 1, dy: 1))
+        ring.lineWidth = 2
+        ring.stroke()
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: diameter * 0.56, weight: .bold),
+            .foregroundColor: colour
+        ]
+        let size = glyph.size(withAttributes: attributes)
+        glyph.draw(
+            at: CGPoint(x: circle.midX - size.width / 2, y: circle.midY - size.height / 2),
+            withAttributes: attributes
+        )
     }
 
     private func drawName(_ name: String, in card: CGRect) {

@@ -43,6 +43,10 @@ struct SpriteFrameAnalysis: Sendable {
     let needsHelpSlots: Set<Int>
     let selectedSpriteName: String?
     let cardAnchors: [SpriteCardAnchor]
+    /// The grid's outer frame, normalized to the captured frame with top-left
+    /// origin. Anchored to static chrome — the rule under the filter row and the
+    /// Sprite Dust bar — so it holds still while the cards scroll behind it.
+    var gridFrame: CGRect? = nil
 }
 
 actor VideoSpriteAnalyzer {
