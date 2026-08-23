@@ -86,8 +86,12 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         if !picker.isActive { picker.isActive = true }
 
         // The hotkey fires while OBS is frontmost, so without this the picker is
-        // asked for by a background app.
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        // asked for by a background app. Plain `activate()` on purpose: the
+        // `ignoringOtherApps` variant forcibly steals focus, and the picking
+        // session is itself competing for key window.
+        if !NSApplication.shared.isActive {
+            NSApplication.shared.activate()
+        }
 
         pickerPresentedAt = CFAbsoluteTimeGetCurrent()
         picker.present()
