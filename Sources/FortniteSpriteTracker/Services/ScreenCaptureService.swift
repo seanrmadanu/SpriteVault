@@ -43,6 +43,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     private let overlayController = SpriteScanOverlayController()
     private var pickerSelectionHandler: PickerSelectionHandler?
     private var pickerObserverInstalled = false
+    private var pickerPresentedAt: CFAbsoluteTime?
 
     var hasSystemSelection: Bool { selectedSystemFilter != nil }
     var systemSelection: SystemCaptureSelection? { selectedSystemSelection }
@@ -56,8 +57,17 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     /// Presents Apple's native ScreenCaptureKit window picker. The scan hotkey
     /// deliberately invokes this every time so the source is explicit and a
     /// stale source selection can never attach overlays to another app.
+    ///
+    /// `isActive` is registration with ControlCenter, not "is the picker on
+    /// screen". Deactivating and reactivating it around every `present()` made
+    /// the app deregister and re-register its picker in the same millisecond —
+    /// ControlCenter logged `didRemovePicker` / `didAddPicker` / `didRequestPicker`
+    /// back to back, and the first selection after launch came back as a filter
+    /// with a nil objectID. Register once, then only present.
     func presentWindowPicker(onSelection: @escaping PickerSelectionHandler) {
-        cancelWindowPicker(notify: false)
+        // Drop any handler from a previous presentation without tearing the
+        // registration down.
+        pickerSelectionHandler = nil
         pickerSelectionHandler = onSelection
 
         let picker = SCContentSharingPicker.shared
@@ -73,7 +83,13 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
             configuration.excludedBundleIDs = [bundleID]
         }
         picker.defaultConfiguration = configuration
-        picker.isActive = true
+        if !picker.isActive { picker.isActive = true }
+
+        // The hotkey fires while OBS is frontmost, so without this the picker is
+        // asked for by a background app.
+        NSApplication.shared.activate(ignoringOtherApps: true)
+
+        pickerPresentedAt = CFAbsoluteTimeGetCurrent()
         picker.present()
     }
 
@@ -84,8 +100,18 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     private func cancelWindowPicker(notify: Bool) {
         let handler = pickerSelectionHandler
         pickerSelectionHandler = nil
-        SCContentSharingPicker.shared.isActive = false
+        // Only the handler is cleared. The picker stays registered so the next
+        // presentation does not have to race ControlCenter re-registering it.
         if notify { handler?(nil) }
+    }
+
+    /// Seconds between `present()` and the picker reporting back. Printed so a
+    /// stall in ControlCenter's picker UI is distinguishable from a stall in
+    /// this app.
+    private func logPickerLatency(_ outcome: String) {
+        guard Fixes.logCaptureAlignment, let started = pickerPresentedAt else { return }
+        pickerPresentedAt = nil
+        print(String(format: "[picker] %@ after %.1fs", outcome, CFAbsoluteTimeGetCurrent() - started))
     }
 
     func clearSystemSelection() {
@@ -328,7 +354,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     ) {
         let handler = pickerSelectionHandler
         pickerSelectionHandler = nil
-        picker.isActive = false
+        logPickerLatency("selection")
 
         guard filter.style == .window else {
             handler?(nil)
@@ -344,14 +370,14 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
         let handler = pickerSelectionHandler
         pickerSelectionHandler = nil
-        picker.isActive = false
+        logPickerLatency("cancelled")
         handler?(nil)
     }
 
     func contentSharingPickerStartDidFailWithError(_ error: Error) {
         let handler = pickerSelectionHandler
         pickerSelectionHandler = nil
-        SCContentSharingPicker.shared.isActive = false
+        logPickerLatency("failed")
         onError?(error)
         handler?(nil)
     }
@@ -901,7 +927,16 @@ private enum SpriteOverlayCardState: Equatable {
     }
 }
 
+/// A name the overlay is allowed to keep showing for a card it already read.
+///
+/// This used to be keyed by grid slot. Slot numbers are indices into the rows
+/// the analyzer found in *this* frame, so when the detected row phase shifts by
+/// one row — which it does routinely between consecutive frames — every card is
+/// renumbered and the cached name lands on the card a row away. Keyed by where
+/// the card actually is instead, a renumbering cannot move a name.
 private struct RememberedOverlayState {
+    /// Card centre, normalized to the captured frame, top-left origin.
+    let centre: CGPoint
     let signature: UInt64
     let state: SpriteOverlayCardState
 }
@@ -932,7 +967,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
     private var hoveredSlot: Int?
     private var hoverStartedAt: TimeInterval = 0
     private var deepScannedSlots = Set<Int>()
-    private var rememberedStates: [Int: RememberedOverlayState] = [:]
+    private var rememberedStates: [RememberedOverlayState] = []
     private var requiresRealignment = false
     private var sessionIdentifiedNames = Set<String>()
     private static var didReportMapping = false
@@ -1038,6 +1073,11 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         // reads as broken even when recognition is fine. They are stale for a
         // moment; that is far less distracting than flicker, and the next stable
         // frame replaces them.
+        //
+        // The *cache* behind them is dropped, though. Once the list has moved,
+        // nothing at a given position is the same card any more, so keeping it
+        // would re-apply the previous page's names to the new one.
+        rememberedStates.removeAll()
         deepScannedSlots.removeAll()
         requiresRealignment = true
         hoveredSlot = nil
@@ -1066,10 +1106,9 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
                 continue
             }
             if !forceProcessing,
-               let remembered = rememberedStates[anchor.slot],
-               signaturesMatch(remembered.signature, anchor.visualSignature),
-               remembered.state.isResolvedIdentity {
-                states[anchor.slot] = remembered.state
+               let remembered = rememberedState(for: anchor),
+               remembered.isResolvedIdentity {
+                states[anchor.slot] = remembered
             } else {
                 states[anchor.slot] = .processing
             }
@@ -1131,27 +1170,17 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
 
         let anchorBySlot = Dictionary(uniqueKeysWithValues: anchors.map { ($0.slot, $0) })
 
-        // Drop memory when the pixels in a slot clearly changed. This is what
-        // lets a deep-scan result survive repeated scans without attaching an
-        // old name to a different Sprite after the user scrolls.
-        let staleSlots = rememberedStates.compactMap { slot, remembered -> Int? in
-            guard let anchor = anchorBySlot[slot],
-                  signaturesMatch(remembered.signature, anchor.visualSignature) else {
-                return slot
-            }
-            return nil
-        }
-        for slot in staleSlots {
-            rememberedStates.removeValue(forKey: slot)
-            deepScannedSlots.remove(slot)
+        // Forget anything that no longer sits under a card in this frame, so the
+        // cache cannot grow across a long scan or keep an entry for a position
+        // the grid has moved away from.
+        rememberedStates.removeAll { remembered in
+            !anchors.contains { covers($0, remembered.centre) }
         }
 
         var states: [Int: SpriteOverlayCardState] = [:]
         for anchor in anchors {
-            if let remembered = rememberedStates[anchor.slot],
-               signaturesMatch(remembered.signature, anchor.visualSignature),
-               remembered.state.isResolvedIdentity {
-                states[anchor.slot] = remembered.state
+            if let remembered = rememberedState(for: anchor), remembered.isResolvedIdentity {
+                states[anchor.slot] = remembered
             } else {
                 states[anchor.slot] = .needsHelp(promptForSelection: false)
             }
@@ -1174,10 +1203,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
                 ? .lost(name: detection.name, level: detection.level, mastered: detection.mastered)
                 : .recognized(name: detection.name, level: detection.level, mastered: detection.mastered)
             states[slot] = state
-            rememberedStates[slot] = RememberedOverlayState(
-                signature: anchor.visualSignature,
-                state: state
-            )
+            remember(state, for: anchor)
         }
 
         // The right-hand panel names exactly one card. Mark that slot so the
@@ -1231,10 +1257,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
                 : .recognized(name: detection.name, level: detection.level, mastered: detection.mastered)
             states[slot] = state
             if let anchor = view.cardAnchors.first(where: { $0.slot == slot }) {
-                rememberedStates[slot] = RememberedOverlayState(
-                    signature: anchor.visualSignature,
-                    state: state
-                )
+                remember(state, for: anchor)
             }
             view.statusText = "Recognized \(detection.name)"
         } else {
@@ -1306,9 +1329,50 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         overlayView?.needsDisplay = true
     }
 
+    /// Whether two card signatures describe the same artwork.
+    ///
+    /// The tolerance used to be 10 bits out of 64, which is far too generous for
+    /// this catalog: measured on the ground-truth captures, Gold Batman and
+    /// Galaxy Batman differ by 3 bits and John Wick and Galaxy Batman by 9, so a
+    /// third of all distinct card pairs compared equal. The signature is now
+    /// colour-aware (see `ScreenshotSpriteAnalyzer.visualSignature`) and this is
+    /// a corroborating check on top of a positional match, not the identity test
+    /// on its own.
     private func signaturesMatch(_ lhs: UInt64, _ rhs: UInt64) -> Bool {
         guard lhs != 0, rhs != 0 else { return lhs == rhs }
-        return (lhs ^ rhs).nonzeroBitCount <= 10
+        return (lhs ^ rhs).nonzeroBitCount <= 3
+    }
+
+    /// True when `centre` (normalized, top-left origin) falls inside the anchor.
+    private func covers(_ anchor: SpriteCardAnchor, _ centre: CGPoint) -> Bool {
+        abs(CGFloat(anchor.x + anchor.width / 2) - centre.x) <= CGFloat(anchor.width) * 0.5
+            && abs(CGFloat(anchor.y + anchor.height / 2) - centre.y) <= CGFloat(anchor.height) * 0.5
+    }
+
+    /// A remembered name may only be reused for a card sitting in the same place
+    /// *and* looking the same. Position survives the analyzer renumbering its
+    /// slots; the signature catches the case where the page changed underneath a
+    /// stationary grid.
+    private func rememberedState(for anchor: SpriteCardAnchor) -> SpriteOverlayCardState? {
+        let centre = CGPoint(x: anchor.x + anchor.width / 2, y: anchor.y + anchor.height / 2)
+        return rememberedStates.first { remembered in
+            abs(remembered.centre.x - centre.x) <= CGFloat(anchor.width) * 0.35
+                && abs(remembered.centre.y - centre.y) <= CGFloat(anchor.height) * 0.35
+                && signaturesMatch(remembered.signature, anchor.visualSignature)
+        }?.state
+    }
+
+    private func remember(_ state: SpriteOverlayCardState, for anchor: SpriteCardAnchor) {
+        let centre = CGPoint(x: anchor.x + anchor.width / 2, y: anchor.y + anchor.height / 2)
+        rememberedStates.removeAll { remembered in
+            abs(remembered.centre.x - centre.x) <= CGFloat(anchor.width) * 0.35
+                && abs(remembered.centre.y - centre.y) <= CGFloat(anchor.height) * 0.35
+        }
+        rememberedStates.append(RememberedOverlayState(
+            centre: centre,
+            signature: anchor.visualSignature,
+            state: state
+        ))
     }
 }
 
@@ -1440,9 +1504,10 @@ private final class SpriteScanOverlayView: NSView {
         ]
         let size = text.size(withAttributes: attributes)
         let badgeWidth = min(card.width - 8, size.width + 10)
+        // Bottom-right, because `drawName` now owns the top strip of the card.
         let badge = CGRect(
             x: card.maxX - badgeWidth - 4,
-            y: card.maxY - size.height - 10,
+            y: card.minY + 4,
             width: badgeWidth,
             height: size.height + 6
         )
@@ -1499,9 +1564,13 @@ private final class SpriteScanOverlayView: NSView {
             attributes: attributes
         )
         let height = min(max(18, ceil(measured.height) + 8), min(card.height * 0.34, 42))
+        // Sit the plate just under the card's top edge rather than on its bottom
+        // one. At the bottom it lands in the gutter, hard against the top of the
+        // next row, which reads as a label for the card below — the geometry can
+        // be exactly right and the overlay still looks off by a row.
         let plate = CGRect(
             x: card.minX + 4,
-            y: card.minY + 4,
+            y: card.maxY - height - 4,
             width: card.width - 8,
             height: height
         )

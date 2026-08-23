@@ -106,9 +106,8 @@ final class LiveCaptureManager: ObservableObject {
     private var sessionProfileName = "My Collection"
     private var sessionSeenNames = Set<String>()
     private var coveredCatalogIndexes = Set<Int>()
-    /// Per-slot running agreement: what the slot last claimed, and for how many
-    /// consecutive stable frames it has claimed it.
-    private var slotAgreement: [Int: (fingerprint: String, count: Int)] = [:]
+    /// How many distinct stable frames have produced each exact reading.
+    private var agreementCounts: [String: Int] = [:]
     private let requiredAgreementFrames = 2
     private var lastProgressNotificationAt: Date?
     private let progressNotificationInterval: TimeInterval = 45
@@ -1062,26 +1061,30 @@ final class LiveCaptureManager: ObservableObject {
 
             if confirmedByPanel {
                 ready.append(detection)
-                if let slot = detection.gridSlot { slotAgreement[slot] = nil }
                 continue
             }
 
-            guard let slot = detection.gridSlot else { continue }
+            // Agreement is tracked per reading, not per grid slot.
+            //
+            // Slot numbers are indices into the rows the analyzer found in this
+            // frame, and the detected row phase routinely shifts by a row between
+            // consecutive frames — the same physical card came back as slot 7,
+            // then slot 4, then slot 1 across three frames of a still screen. Any
+            // counter keyed by slot is therefore counting a moving target: it
+            // resets when nothing changed, and pairs up readings from two
+            // different cards when the numbering happens to line up. The reading
+            // itself is what has to repeat.
             let fingerprint = "\(normalizedName(detection.name))"
                 + "|\(detection.status.rawValue)"
                 + "|\(detection.level.map(String.init) ?? "?")"
                 + "|\(detection.mastered ? "M" : "N")"
 
-            if let existing = slotAgreement[slot], existing.fingerprint == fingerprint {
-                let count = existing.count + 1
-                if count >= requiredAgreementFrames {
-                    ready.append(detection)
-                    slotAgreement[slot] = nil
-                } else {
-                    slotAgreement[slot] = (fingerprint, count)
-                }
+            let count = (agreementCounts[fingerprint] ?? 0) + 1
+            if count >= requiredAgreementFrames {
+                ready.append(detection)
+                agreementCounts[fingerprint] = nil
             } else {
-                slotAgreement[slot] = (fingerprint, 1)
+                agreementCounts[fingerprint] = count
             }
         }
 
@@ -1259,7 +1262,7 @@ final class LiveCaptureManager: ObservableObject {
         isCollectionScreenDetected = false
         sessionSeenNames.removeAll(keepingCapacity: true)
         coveredCatalogIndexes.removeAll(keepingCapacity: true)
-        slotAgreement.removeAll(keepingCapacity: true)
+        agreementCounts.removeAll(keepingCapacity: true)
         newNames.removeAll(keepingCapacity: true)
         levelUpNames.removeAll(keepingCapacity: true)
         masteredNames.removeAll(keepingCapacity: true)
