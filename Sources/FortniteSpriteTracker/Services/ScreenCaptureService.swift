@@ -935,6 +935,7 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
     private var rememberedStates: [Int: RememberedOverlayState] = [:]
     private var requiresRealignment = false
     private var sessionIdentifiedNames = Set<String>()
+    private static var didReportMapping = false
 
     deinit {
         hoverTimer?.invalidate()
@@ -1032,17 +1033,17 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
 
     func showMoving() {
         precondition(Thread.isMainThread)
-        // Do not leave a fixed stencil sitting over the game while Fortnite is
-        // scrolling. Keep the last confirmed anchors internally, hide the card
-        // boxes, then reuse them for animated processing dots only after the next
-        // stable frame passes the strict Sprites/Collection gate.
+        // Keep the last known marks on screen while Fortnite scrolls. Clearing
+        // them here made every mark blink out and back on each scroll, which
+        // reads as broken even when recognition is fine. They are stale for a
+        // moment; that is far less distracting than flicker, and the next stable
+        // frame replaces them.
         deepScannedSlots.removeAll()
         requiresRealignment = true
         hoveredSlot = nil
         overlayView?.hoveredSlot = nil
-        overlayView?.mode = .moving
-        overlayView?.statusText = "Tracking scroll · aligning cards…"
-        overlayView?.cardStates = [:]
+        overlayView?.mode = .collection
+        overlayView?.statusText = "Tracking scroll…"
         overlayView?.needsDisplay = true
     }
 
@@ -1106,6 +1107,19 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
         let anchors = analysis.cardAnchors.sorted { $0.slot < $1.slot }
         view.cardAnchors = anchors
         view.gridFrame = analysis.gridFrame
+
+        // One-shot mapping report. Everything the overlay draws is
+        // anchor-normalized-to-capture mapped onto the view's bounds, so if a
+        // mark lands in the wrong place the error is visible in exactly these
+        // numbers. Printed once so the log stays readable.
+        if Fixes.logCaptureAlignment, !Self.didReportMapping, let first = anchors.first {
+            Self.didReportMapping = true
+            let drawn = view.cardRectForDiagnostics(first)
+            print("[map] view.bounds=\(view.bounds)  panel.frame=\(panel?.frame.debugDescription ?? "nil")")
+            print("[map] slot \(first.slot) anchor y=\(String(format: "%.4f", first.y)) h=\(String(format: "%.4f", first.height))"
+                  + " -> drawn y=\(Int(drawn.minY)) h=\(Int(drawn.height))"
+                  + "  (view height \(Int(view.bounds.height)))")
+        }
 
         guard !anchors.isEmpty else {
             view.mode = .waiting
@@ -1367,87 +1381,19 @@ private final class SpriteScanOverlayView: NSView {
     /// card. The lines land in the dead space Fortnite leaves between cards, so
     /// they never sit on top of artwork, and a small alignment error shows up as
     /// a line drifting off a gutter instead of a box cutting across two Sprites.
+    /// Marks only — no frame, no lattice.
+    ///
+    /// Any outline has to sit exactly on a card edge to look right, so a small
+    /// alignment error reads as a broken box cutting across two Sprites. A tick
+    /// and a name near the middle of a cell carry the same information and stay
+    /// legible even if the geometry is a little out, so the overlay no longer
+    /// stakes its credibility on pixel-perfect edges.
     private func drawAlignedCards() {
-        let rects = cardAnchors.reduce(into: [Int: CGRect]()) { $0[$1.slot] = cardRect(for: $1) }
-        guard !rects.isEmpty else { return }
-
-        // Recover the row and column bands from the card rectangles.
-        var columnBands: [(min: CGFloat, max: CGFloat)] = []
-        var rowBands: [(min: CGFloat, max: CGFloat)] = []
-        for (slot, rect) in rects.sorted(by: { $0.key < $1.key }) {
-            let column = slot % 3
-            let row = slot / 3
-            while columnBands.count <= column { columnBands.append((.infinity, -.infinity)) }
-            while rowBands.count <= row { rowBands.append((.infinity, -.infinity)) }
-            columnBands[column] = (min(columnBands[column].min, rect.minX),
-                                   max(columnBands[column].max, rect.maxX))
-            rowBands[row] = (min(rowBands[row].min, rect.minY),
-                             max(rowBands[row].max, rect.maxY))
-        }
-        columnBands = columnBands.filter { $0.min.isFinite && $0.max.isFinite }
-        rowBands = rowBands.filter { $0.min.isFinite && $0.max.isFinite }
-        // This view is not flipped, so row 0 sits at the *highest* y. The outer
-        // bounds are therefore the first row's top edge and the last row's
-        // bottom edge — taking first.min/last.max instead draws the lattice
-        // across the middle rows only.
-        guard let left = columnBands.first?.min, let right = columnBands.last?.max,
-              let top = rowBands.first?.max, let bottom = rowBands.last?.min else { return }
-
-        func line(from a: CGPoint, to b: CGPoint, width: CGFloat) {
-            let path = NSBezierPath()
-            path.move(to: a)
-            path.line(to: b)
-            path.lineWidth = width
-            path.stroke()
-        }
-
-        // The reference frame is anchored to chrome that does not scroll, so it
-        // holds still even while the cards move behind it.
-        if let frame = gridFrame {
-            let rect = CGRect(
-                x: bounds.minX + bounds.width * frame.minX,
-                y: bounds.maxY - bounds.height * frame.maxY,
-                width: bounds.width * frame.width,
-                height: bounds.height * frame.height
-            )
-            NSColor(calibratedWhite: 0.80, alpha: 0.85).setStroke()
-            let path = NSBezierPath(rect: rect)
-            path.lineWidth = 2.0
-            path.stroke()
-        }
-
-        let lattice = NSColor(calibratedRed: 0.35, green: 0.95, blue: 1.0, alpha: 0.90)
-        lattice.setStroke()
-
-        // Lattice: outer bounds of the cards, then a line down every gutter.
-        line(from: CGPoint(x: left, y: top), to: CGPoint(x: right, y: top), width: 1.5)
-        line(from: CGPoint(x: left, y: bottom), to: CGPoint(x: right, y: bottom), width: 1.5)
-        line(from: CGPoint(x: left, y: top), to: CGPoint(x: left, y: bottom), width: 1.5)
-        line(from: CGPoint(x: right, y: top), to: CGPoint(x: right, y: bottom), width: 1.5)
-
-        for index in 1..<max(columnBands.count, 1) {
-            let gutter = (columnBands[index - 1].max + columnBands[index].min) / 2
-            line(from: CGPoint(x: gutter, y: top), to: CGPoint(x: gutter, y: bottom), width: 2.0)
-        }
-        for index in 1..<max(rowBands.count, 1) {
-            // NSView is not flipped here, so a later row sits lower on screen.
-            let gutter = (rowBands[index - 1].min + rowBands[index].max) / 2
-            line(from: CGPoint(x: left, y: gutter), to: CGPoint(x: right, y: gutter), width: 2.0)
-        }
-
-        // Per-cell state still needs to read, but without a competing outline.
-        for (slot, rect) in rects {
-            guard let state = cardStates[slot] else { continue }
-            if hoveredSlot == slot {
-                NSColor.black.withAlphaComponent(0.30).setFill()
-                NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
-                outlineColour(for: state, slot: slot).setStroke()
-                let highlight = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
-                highlight.lineWidth = 2.5
-                highlight.stroke()
-                lattice.setStroke()
-            }
-            drawState(state, in: rect, slot: slot)
+        for anchor in cardAnchors {
+            let rect = cardRect(for: anchor)
+            guard rect.width >= 16, rect.height >= 16 else { continue }
+            guard let state = cardStates[anchor.slot] else { continue }
+            drawState(state, in: rect, slot: anchor.slot)
         }
     }
 
@@ -1476,7 +1422,9 @@ private final class SpriteScanOverlayView: NSView {
             drawCentreMark("?", colour: NSColor(calibratedRed: 1.0, green: 0.62, blue: 0.25, alpha: 1), in: card)
             if prompt { drawBadge(text: "SELECT", in: card) }
         case .locked:
-            drawCentreMark("🔒", colour: NSColor(calibratedWhite: 0.75, alpha: 1), in: card)
+            // Nothing to say about a locked card, and a page of them is mostly
+            // locked — marking each one would bury the marks that matter.
+            break
         }
 
         if case .needsHelp = state, hoveredSlot == slot {
@@ -1643,6 +1591,8 @@ private final class SpriteScanOverlayView: NSView {
         NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6).fill()
         text.draw(in: rect.insetBy(dx: 10, dy: 6), withAttributes: attributes)
     }
+
+    func cardRectForDiagnostics(_ anchor: SpriteCardAnchor) -> CGRect { cardRect(for: anchor) }
 
     private func cardRect(for anchor: SpriteCardAnchor) -> CGRect {
         let width = bounds.width * CGFloat(anchor.width)
