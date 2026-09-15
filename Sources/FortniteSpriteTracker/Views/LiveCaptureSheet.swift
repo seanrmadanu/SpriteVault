@@ -316,7 +316,7 @@ struct LiveCaptureSheet: View {
             VStack(spacing: 0) {
                 permissionRow(
                     title: "Screen Recording",
-                    detail: "Required for the native Fortnite window picker.",
+                    detail: "Required to list and read the window showing Fortnite.",
                     granted: liveCapture.screenRecordingGranted,
                     buttonTitle: "Enable"
                 ) { liveCapture.requestScreenRecordingPermission() }

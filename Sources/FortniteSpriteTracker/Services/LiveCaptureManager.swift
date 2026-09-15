@@ -451,7 +451,7 @@ final class LiveCaptureManager: ObservableObject {
         }
     }
 
-    /// Control + Option + S always starts with Apple's window picker. Reusing a
+    /// Control + Option + S always starts with Sprite Vault's window chooser. Reusing a
     /// stale source was the main reason overlays appeared on unrelated windows.
     /// Control + Option + X cancels the picker or stops the active scan.
     func startHotkeyScanSession() async {

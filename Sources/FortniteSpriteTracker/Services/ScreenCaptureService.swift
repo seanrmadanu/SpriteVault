@@ -5,8 +5,9 @@ import CoreGraphics
 import CoreImage
 import CoreMedia
 import CoreVideo
+import SwiftUI
 
-final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SCContentSharingPickerObserver, @unchecked Sendable {
+final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     typealias AnalysisHandler = @Sendable (SpriteFrameAnalysis) -> Void
     typealias StatusHandler = @Sendable (String) -> Void
     typealias PreviewHandler = @Sendable (CGImage) -> Void
@@ -41,9 +42,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
     private var selectedOverlayRect: CGRect?
     private var latestStableFrame: CGImage?
     private let overlayController = SpriteScanOverlayController()
-    private var pickerSelectionHandler: PickerSelectionHandler?
-    private var pickerObserverInstalled = false
-    private var pickerPresentedAt: CFAbsoluteTime?
+    @MainActor private var windowPicker: CaptureWindowPickerController?
 
     var hasSystemSelection: Bool { selectedSystemFilter != nil }
     var systemSelection: SystemCaptureSelection? { selectedSystemSelection }
@@ -54,68 +53,45 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
         }
     }
 
-    /// Presents Apple's native ScreenCaptureKit window picker. The scan hotkey
-    /// deliberately invokes this every time so the source is explicit and a
-    /// stale source selection can never attach overlays to another app.
-    ///
-    /// `isActive` is registration with ControlCenter, not "is the picker on
-    /// screen". Deactivating and reactivating it around every `present()` made
-    /// the app deregister and re-register its picker in the same millisecond —
-    /// ControlCenter logged `didRemovePicker` / `didAddPicker` / `didRequestPicker`
-    /// back to back, and the first selection after launch came back as a filter
-    /// with a nil objectID. Register once, then only present.
+    /// Choose an explicit window without entering Control Center's desktop-wide
+    /// picking mode, which can stall window interaction before capture begins.
+    @MainActor
     func presentWindowPicker(onSelection: @escaping PickerSelectionHandler) {
-        // Drop any handler from a previous presentation without tearing the
-        // registration down.
-        pickerSelectionHandler = nil
-        pickerSelectionHandler = onSelection
-
-        let picker = SCContentSharingPicker.shared
-        if !pickerObserverInstalled {
-            picker.add(self)
-            pickerObserverInstalled = true
+        // Resolve an older wait before replacing its panel/continuation.
+        cancelWindowPicker()
+        let picker = CaptureWindowPickerController(loadWindows: {
+            let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+            let ownPID = ProcessInfo.processInfo.processIdentifier
+            return content.windows.filter {
+                $0.frame.width >= 320 && $0.frame.height >= 180
+                    && $0.owningApplication != nil
+                    && $0.owningApplication?.processID != ownPID
+            }.sorted(by: Self.scWindowSort)
+        })
+        windowPicker = picker
+        picker.show { [weak self] window in
+            guard let self else { onSelection(nil); return }
+            self.windowPicker = nil
+            guard let window else { onSelection(nil); return }
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            self.selectedSystemFilter = filter
+            self.selectedOverlayRect = Self.resolveOverlayRect(forWindowID: window.windowID, fallback: window.frame)
+            let selection = SystemCaptureSelection(
+                styleName: "Window",
+                displayName: CaptureWindowPickerController.displayName(window),
+                detail: "Selected in Sprite Vault",
+                width: max(Int((filter.contentRect.width * CGFloat(filter.pointPixelScale)).rounded()), 1),
+                height: max(Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded()), 1)
+            )
+            self.selectedSystemSelection = selection
+            onSelection(selection)
         }
-
-        var configuration = SCContentSharingPickerConfiguration()
-        configuration.allowedPickerModes = .singleWindow
-        configuration.allowsChangingSelectedContent = true
-        if let bundleID = Bundle.main.bundleIdentifier {
-            configuration.excludedBundleIDs = [bundleID]
-        }
-        picker.defaultConfiguration = configuration
-        if !picker.isActive { picker.isActive = true }
-
-        // The hotkey fires while OBS is frontmost, so without this the picker is
-        // asked for by a background app. Plain `activate()` on purpose: the
-        // `ignoringOtherApps` variant forcibly steals focus, and the picking
-        // session is itself competing for key window.
-        if !NSApplication.shared.isActive {
-            NSApplication.shared.activate()
-        }
-
-        pickerPresentedAt = CFAbsoluteTimeGetCurrent()
-        picker.present()
     }
 
+    @MainActor
     func cancelWindowPicker() {
-        cancelWindowPicker(notify: true)
-    }
-
-    private func cancelWindowPicker(notify: Bool) {
-        let handler = pickerSelectionHandler
-        pickerSelectionHandler = nil
-        // Only the handler is cleared. The picker stays registered so the next
-        // presentation does not have to race ControlCenter re-registering it.
-        if notify { handler?(nil) }
-    }
-
-    /// Seconds between `present()` and the picker reporting back. Printed so a
-    /// stall in ControlCenter's picker UI is distinguishable from a stall in
-    /// this app.
-    private func logPickerLatency(_ outcome: String) {
-        guard Fixes.logCaptureAlignment, let started = pickerPresentedAt else { return }
-        pickerPresentedAt = nil
-        print(String(format: "[picker] %@ after %.1fs", outcome, CFAbsoluteTimeGetCurrent() - started))
+        windowPicker?.finish(nil)
+        windowPicker = nil
     }
 
     func clearSystemSelection() {
@@ -349,41 +325,6 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, SC
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         onError?(error)
-    }
-
-    func contentSharingPicker(
-        _ picker: SCContentSharingPicker,
-        didUpdateWith filter: SCContentFilter,
-        for stream: SCStream?
-    ) {
-        let handler = pickerSelectionHandler
-        pickerSelectionHandler = nil
-        logPickerLatency("selection")
-
-        guard filter.style == .window else {
-            handler?(nil)
-            return
-        }
-        selectedSystemFilter = filter
-        selectedOverlayRect = Self.resolveOverlayRect(for: filter)
-        let selection = Self.describeSystemSelection(filter)
-        selectedSystemSelection = selection
-        handler?(selection)
-    }
-
-    func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
-        let handler = pickerSelectionHandler
-        pickerSelectionHandler = nil
-        logPickerLatency("cancelled")
-        handler?(nil)
-    }
-
-    func contentSharingPickerStartDidFailWithError(_ error: Error) {
-        let handler = pickerSelectionHandler
-        pickerSelectionHandler = nil
-        logPickerLatency("failed")
-        onError?(error)
-        handler?(nil)
     }
 
     func stream(
@@ -1678,6 +1619,185 @@ private final class SpriteScanOverlayView: NSView {
         )
     }
 }
+
+// MARK: - Responsive in-app window selection
+
+@MainActor
+private final class CaptureWindowPickerController: NSObject, ObservableObject, NSWindowDelegate {
+    @Published private(set) var windows: [SCWindow] = []
+    @Published private(set) var isLoading = false
+    @Published private(set) var errorText: String?
+    @Published var selectedID: CGWindowID?
+
+    private let loadWindows: @MainActor () async throws -> [SCWindow]
+    private let timeout: Duration
+    private var panel: NSPanel?
+    private var completion: (@MainActor (SCWindow?) -> Void)?
+    private var loadTask: Task<Void, Never>?
+    private var timeoutTask: Task<Void, Never>?
+    private var requestID: UUID?
+
+    init(timeout: Duration = .seconds(15), loadWindows: @escaping @MainActor () async throws -> [SCWindow]) {
+        self.timeout = timeout
+        self.loadWindows = loadWindows
+    }
+
+    func show(onSelection: @escaping @MainActor (SCWindow?) -> Void) {
+        completion = onSelection
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 430),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Choose Fortnite Window"
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.level = .floating
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.delegate = self
+        panel.contentView = NSHostingView(rootView: CaptureWindowPickerView(model: self))
+        self.panel = panel
+        panel.center()
+        NSApplication.shared.activate()
+        panel.makeKeyAndOrderFront(nil)
+        refresh()
+    }
+
+    func refresh() {
+        loadTask?.cancel()
+        timeoutTask?.cancel()
+        let id = UUID()
+        requestID = id
+        windows = []
+        selectedID = nil
+        errorText = nil
+        isLoading = true
+
+        // Window enumeration is asynchronous. Even if the system service never
+        // replies, Cancel works and the timeout restores the Refresh button.
+        loadTask = Task { [weak self, loadWindows] in
+            do {
+                let windows = try await loadWindows()
+                guard let self, self.requestID == id else { return }
+                self.completeLoad()
+                self.windows = windows
+            } catch {
+                guard let self, self.requestID == id else { return }
+                self.completeLoad()
+                self.errorText = "Could not list windows. Check Screen Recording permission for Sprite Vault, then refresh. \(error.localizedDescription)"
+            }
+        }
+        timeoutTask = Task { [weak self, timeout] in
+            do { try await Task.sleep(for: timeout) } catch { return }
+            guard let self, self.requestID == id else { return }
+            self.requestID = nil
+            self.loadTask?.cancel()
+            self.loadTask = nil
+            self.isLoading = false
+            self.errorText = "macOS is taking too long to list windows. Keep OBS open, then refresh or cancel and try again."
+        }
+    }
+
+    private func completeLoad() {
+        requestID = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        loadTask = nil
+        isLoading = false
+    }
+
+    func selectWindow() {
+        guard !isLoading, let window = windows.first(where: { $0.windowID == selectedID }) else { return }
+        finish(window)
+    }
+
+    func finish(_ window: SCWindow?) {
+        // Clear the callback before closing: the close delegate can re-enter.
+        let callback = completion
+        completion = nil
+        requestID = nil
+        loadTask?.cancel()
+        timeoutTask?.cancel()
+        loadTask = nil
+        timeoutTask = nil
+        isLoading = false
+        panel?.close()
+        panel = nil
+        callback?(window)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        // The title-bar close button must resolve the hotkey's awaiting task.
+        guard completion != nil else { return }
+        finish(nil)
+    }
+
+    static func displayName(_ window: SCWindow) -> String {
+        let app = window.owningApplication?.applicationName ?? "Window"
+        let title = (window.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty || title == app ? app : "\(app) — \(title)"
+    }
+}
+
+private struct CaptureWindowPickerView: View {
+    @ObservedObject var model: CaptureWindowPickerController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Choose the window showing Fortnite")
+                .font(.headline)
+            Text("For OBS, choose its Projector or Preview window. Only the window you select will be read.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            if model.isLoading {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Finding open windows…")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let error = model.errorText {
+                Text(error)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.windows.isEmpty {
+                Text("No capture windows found. Open the OBS Projector window, then click Refresh.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(selection: $model.selectedID) {
+                    ForEach(model.windows, id: \.windowID) { window in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(CaptureWindowPickerController.displayName(window))
+                                .lineLimit(2)
+                            Text("\(Int(window.frame.width)) × \(Int(window.frame.height))")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 3)
+                        .tag(window.windowID)
+                    }
+                }
+                .border(.quaternary)
+            }
+
+            HStack {
+                Button("Refresh") { model.refresh() }
+                    .disabled(model.isLoading)
+                Spacer()
+                Button("Cancel") { model.finish(nil) }
+                    .keyboardShortcut(.cancelAction)
+                Button("Use Window") { model.selectWindow() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(model.isLoading || model.selectedID == nil)
+            }
+        }
+        .padding(20)
+        .frame(width: 560, height: 430)
+    }
+}
+
 
 private enum ScreenCaptureServiceError: LocalizedError {
     case windowUnavailable

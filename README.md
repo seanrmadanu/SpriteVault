@@ -21,8 +21,8 @@ Requirements:
 Sprite Vault no longer asks the user to draw or save a capture area.
 
 1. Press **Control + Option + S** (`⌃⌥S`).
-2. Apple's native window picker opens in single-window mode.
-3. Select the window that contains Fortnite, Remote Play, or an OBS projector showing Fortnite.
+2. Sprite Vault opens its own window chooser. OBS projector and preview windows appear near the top.
+3. Select the window that contains Fortnite, Remote Play, or an OBS projector showing Fortnite, then click **Use Window**. If listing windows fails or takes longer than 15 seconds, use **Refresh** to retry. **Cancel**, Escape, and the close button remain available while windows load.
 4. Sprite Vault checks the top navigation and requires both selected treatments:
    - the highlighted **SPRITES** tab;
    - the yellow underline under **COLLECTION**.
