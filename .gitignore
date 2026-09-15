@@ -1,0 +1,13 @@
+# Build products
+.build/
+DerivedData/
+.swiftpm/
+xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
+__MACOSX/
+
+# Local test captures
+TestScreenshots/

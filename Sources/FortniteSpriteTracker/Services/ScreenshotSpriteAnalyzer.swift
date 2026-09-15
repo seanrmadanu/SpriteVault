@@ -6,6 +6,8 @@ import CoreGraphics
 
 actor ScreenshotSpriteAnalyzer {
     static let shared = ScreenshotSpriteAnalyzer()
+    /// The selected detail panel must not queue behind full-grid feature prints.
+    static let selectedReader = ScreenshotSpriteAnalyzer()
 
     private let catalog = SpriteCatalog.all
     private lazy var catalogByLongestName = catalog.sorted { $0.name.count > $1.name.count }
@@ -59,6 +61,62 @@ actor ScreenshotSpriteAnalyzer {
         onProgress: @escaping @Sendable (Double, String) -> Void
     ) async throws -> [DetectedSprite] {
         try await analyzeFrame(image: screenshot, onProgress: onProgress).detections
+    }
+
+    /// A bounded live pass: prove the collection page, read the selected detail
+    /// panel, then locate its focus border. It never builds artwork references,
+    /// recognizes the other cards' levels, or infers identities from grid order.
+    func analyzeSelectedFrame(image screenshot: CGImage) async throws -> SpriteFrameAnalysis {
+        try Task.checkCancellation()
+        let viewport = contentViewport(in: screenshot)
+        let isCollection = try isSpritesCollectionSelected(screenshot, viewport: viewport)
+        guard isCollection,
+              let detail = try recognizedRightPanel(in: screenshot, viewport: viewport) else {
+            return SpriteFrameAnalysis(
+                detections: [], isCollectionScreen: isCollection, visibleSlots: 0,
+                inferredPageStart: nil, coveredCatalogIndexes: [], lockedSlots: [],
+                needsHelpSlots: [], selectedSpriteName: nil, cardAnchors: []
+            )
+        }
+        try Task.checkCancellation()
+
+        let grid = try recognizedGridLayout(in: screenshot, viewport: viewport, readLevels: false)
+        let visibleSlots = selectedVisibleSlots(
+            from: grid.rects, viewport: viewport, pageStart: nil, dividerY: measuredDividerY
+        )
+        var cards: [Int: CGImage] = [:]
+        var candidates: [(slot: Int, score: Double)] = []
+        if grid.isCalibrated {
+            for slot in visibleSlots.sorted() {
+                guard let card = cropTopLeft(screenshot, to: grid.rects[slot]) else { continue }
+                cards[slot] = card
+                candidates.append((slot, selectionScore(in: card)))
+            }
+        }
+        let selectedSlot = bestSelectedSlot(candidates)
+        let catalogIndex = catalog.firstIndex { $0.name == detail.item.name }
+        let detection = DetectedSprite(
+            name: detail.item.name, rarity: detail.item.rarity,
+            status: detail.isLost ? .lost : .collected,
+            level: detail.level, mastered: detail.mastered, timestamp: 0,
+            observations: 1, catalogIndex: catalogIndex, gridSlot: selectedSlot
+        )
+        let anchors: [SpriteCardAnchor]
+        if let slot = selectedSlot, let card = cards[slot] {
+            anchors = [makeCardAnchor(slot: slot, rect: grid.rects[slot], card: card, image: screenshot)]
+        } else {
+            // The panel still proves the reading even if focus is ambiguous.
+            // Leave it slotless rather than labeling a different visible card.
+            anchors = []
+        }
+        return SpriteFrameAnalysis(
+            detections: [detection], isCollectionScreen: true,
+            visibleSlots: visibleSlots.count, inferredPageStart: nil,
+            coveredCatalogIndexes: catalogIndex.map { Set([$0]) } ?? [],
+            lockedSlots: [], needsHelpSlots: [], selectedSpriteName: detail.item.name,
+            cardAnchors: anchors,
+            gridFrame: grid.isCalibrated ? referenceGridFrame(in: screenshot, viewport: viewport) : nil
+        )
     }
 
     /// Live capture gets richer metadata than a media import. In addition to
@@ -302,7 +360,7 @@ actor ScreenshotSpriteAnalyzer {
                 rarity: detail.item.rarity,
                 status: detail.isLost ? .lost : .collected,
                 level: detail.level,
-                mastered: detail.mastered || detail.level == 5,
+                mastered: detail.mastered,
                 timestamp: 0,
                 observations: 1,
                 catalogIndex: catalogIndex,
@@ -422,7 +480,7 @@ actor ScreenshotSpriteAnalyzer {
         guard let card = cropTopLeft(screenshot, to: rect) else { return nil }
 
         let level = grid.levelsBySlot[slot]
-        let mastered = (level == 5) || hasMasteryCrown(in: card)
+        let mastered = hasMasteryCrown(in: card)
         guard level != nil || mastered || unlockedVisualScore(in: card) >= 0.16 else { return nil }
         let status: SpriteCollectionStatus = isVisuallyLost(in: card) ? .lost : .collected
 
@@ -733,7 +791,11 @@ actor ScreenshotSpriteAnalyzer {
     /// labels as anchors because they move with the cards while the collection
     /// scrolls. If calibration is not confident we keep the old crops only for
     /// recognition and deliberately return no overlay anchors.
-    private func recognizedGridLayout(in screenshot: CGImage, viewport: CGRect) throws -> GridLayout {
+    private func recognizedGridLayout(
+        in screenshot: CGImage, viewport: CGRect, readLevels: Bool = true
+    ) throws -> GridLayout {
+        var observations: [GridLevelObservation] = []
+        if readLevels {
         let searchRect = CGRect(
             x: viewport.minX + viewport.width * 0.045,
             y: viewport.minY + viewport.height * 0.16,
@@ -754,7 +816,6 @@ actor ScreenshotSpriteAnalyzer {
         let handler = VNImageRequestHandler(cgImage: gridImage, options: [:])
         try handler.perform([request])
 
-        var observations: [GridLevelObservation] = []
         for observation in request.results ?? [] {
             guard let level = observation.topCandidates(3).compactMap({ parseLevel($0.string) }).first else {
                 continue
@@ -764,6 +825,7 @@ actor ScreenshotSpriteAnalyzer {
                 y: searchRect.minY + (1 - observation.boundingBox.midY) * searchRect.height
             )
             observations.append(GridLevelObservation(level: level, point: point))
+        }
         }
 
         // 1.6 — one source of truth for card size. These used to be independent
@@ -1992,7 +2054,7 @@ actor ScreenshotSpriteAnalyzer {
         // The selected card is normally much brighter because of Fortnite's
         // white focus treatment. Avoid forcing a right-panel identity onto a
         // slot when the focus highlight is ambiguous.
-        guard best.score >= second + 0.035 || best.score >= 0.30 else { return nil }
+        guard best.score >= second + 0.055 else { return nil }
         return best.slot
     }
 
