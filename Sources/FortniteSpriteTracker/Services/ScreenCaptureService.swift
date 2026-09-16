@@ -25,7 +25,17 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
     private var previousFingerprint: [UInt8]?
     private var lastAnalyzedFingerprint: [UInt8]?
     private var minimumAnalysisInterval: TimeInterval = 0.65
-    private let settleDelay: TimeInterval = 0.48
+    private let freshness = CaptureFreshness()
+    private var activeCaptureStream: SCStream?
+    private var selectedTask: Task<Void, Never>?
+    private var gridTask: Task<Void, Never>?
+    private var selectedRequestID: UUID?
+    private var gridRequestID: UUID?
+    private var lastSelectedStarted = CFAbsoluteTime(0)
+    private var previousDetailFingerprint: [UInt8]?
+    private var selectedConfirmation = SelectedReadingConfirmation()
+    private var confirmedSelectedAnalysis: SpriteFrameAnalysis?
+    private var panelConfirmedNames = Set<String>()
     private var motionStateActive = false
     private var previewEnabled = false
     private var lastFrameReceivedAt = CFAbsoluteTime(0)
@@ -274,7 +284,6 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
         // Keep motion/overlay feedback smooth while limiting expensive Vision.
         // A stable view is analyzed at most about twice per second.
         self.minimumAnalysisInterval = 0.48
-        resetAdaptiveState()
         latestStableFrame = nil
         overlayController.onDeepScan = { [weak self] slot in
             self?.requestDeepScan(slot: slot)
@@ -293,7 +302,21 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
         stream = newStream
-        try await newStream.startCapture()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            sampleQueue.async { [self] in
+                resetAdaptiveState()
+                panelConfirmedNames.removeAll()
+                activeCaptureStream = newStream
+                freshness.start()
+                continuation.resume()
+            }
+        }
+        do {
+            try await newStream.startCapture()
+        } catch {
+            await stop()
+            throw error
+        }
         sampleQueue.async { [weak self] in
             guard let self else { return }
             self.lastFrameReceivedAt = CFAbsoluteTimeGetCurrent()
@@ -304,6 +327,13 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
     }
 
     func stop() async {
+        freshness.stop()
+        sampleQueue.async { [weak self] in
+            self?.activeCaptureStream = nil
+            self?.resetAdaptiveState()
+            self?.watchdogTimer?.cancel()
+            self?.watchdogTimer = nil
+        }
         DispatchQueue.main.async { [overlayController] in overlayController.hide() }
         latestStableFrame = nil
         guard let stream else { return }
@@ -324,7 +354,14 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        onError?(error)
+        sampleQueue.async { [weak self] in
+            guard let self, stream === self.activeCaptureStream else { return }
+            self.freshness.stop()
+            self.activeCaptureStream = nil
+            self.resetAdaptiveState()
+            self.onError?(error)
+            DispatchQueue.main.async { [overlayController = self.overlayController] in overlayController.hide() }
+        }
     }
 
     func stream(
@@ -332,178 +369,234 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of outputType: SCStreamOutputType
     ) {
-        guard outputType == .screen,
+        guard stream === activeCaptureStream,
+              outputType == .screen,
               CMSampleBufferIsValid(sampleBuffer),
               CMSampleBufferDataIsReady(sampleBuffer),
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            return
-        }
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         let now = CFAbsoluteTimeGetCurrent()
         lastFrameReceivedAt = now
         if watchdogReportedIdle {
             watchdogReportedIdle = false
-            previousFingerprint = nil
-            lastAnalyzedFingerprint = nil
-            latestStableFrame = nil
-            motionStateActive = false
-            DispatchQueue.main.async { [overlayController] in
-                overlayController.showWaiting(message: "Open Sprites → Collection · Stop ⌃⌥X")
-            }
-            onStatus?("Capture resumed — checking Sprites → Collection…")
+            invalidateScene()
         }
-        guard let fingerprint = motionFingerprint(pixelBuffer) else { return }
+        guard let grid = motionFingerprint(pixelBuffer),
+              let detail = motionFingerprint(pixelBuffer, detail: true) else { return }
 
-        if let previousFingerprint {
-            let motion = fingerprintDistance(previousFingerprint, fingerprint)
-            if motion > 0.075 {
-                lastMotionAt = now
-                // A real scene change invalidates the previous stable-frame cache.
-                // Without this reset, switching away from Fortnite and returning
-                // to the same page can leave the scanner permanently "paused".
-                lastAnalyzedFingerprint = nil
-                latestStableFrame = nil
-                if !motionStateActive {
-                    motionStateActive = true
-                    DispatchQueue.main.async { [overlayController] in
-                        overlayController.showMoving()
-                    }
-                    onStatus?("Screen moving — waiting briefly for the collection to settle…")
-                }
-            }
-        } else {
+        // Compare with the scene baseline too: slow movement can be too small
+        // between adjacent frames but still move a label onto a different card.
+        let gridChanged = previousFingerprint.map { fingerprintDistance($0, grid) > 0.035 } ?? false
+        let detailChanged = previousDetailFingerprint.map { fingerprintDistance($0, detail) > 0.045 } ?? false
+        if gridChanged || detailChanged {
+            invalidateScene()
             lastMotionAt = now
         }
-        previousFingerprint = fingerprint
-
-        guard now - lastMotionAt >= settleDelay else { return }
-
-        if motionStateActive {
-            motionStateActive = false
-            onStatus?("Screen stable — scanner active.")
+        if previousFingerprint == nil || gridChanged || detailChanged {
+            previousFingerprint = grid
+            previousDetailFingerprint = detail
         }
 
-        guard !isAnalyzingFrame,
-              now - lastAnalysisStarted >= minimumAnalysisInterval else { return }
+        let fastReady = selectedTask == nil && now - lastSelectedStarted >= 0.16
+            && now - lastMotionAt >= 0.08
+        let gridReady = gridTask == nil && !isAnalyzingFrame
+            && now - lastAnalysisStarted >= 1.2 && now - lastMotionAt >= 0.30
+        guard fastReady || gridReady else { return }
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let frame = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+        latestStableFrame = frame
 
-        if let lastAnalyzedFingerprint,
-           fingerprintDistance(lastAnalyzedFingerprint, fingerprint) < 0.018 {
-            // Same stable view. Keep the scan alive, but avoid expensive OCR.
+        if previewEnabled, now - lastPreviewAt >= 1.0 {
+            lastPreviewAt = now
+            onPreview?(frame)
+        }
+        if fastReady { startSelectedAnalysis(frame, startedAt: now) }
+        if gridReady { startGridAnalysis(frame, startedAt: now) }
+    }
+
+    /// Called only on sampleQueue. A revision covers the current visible
+    /// contents, not just the stream, so queued UI work is invalidated as well.
+    private func invalidateScene() {
+        let generation = freshness.advance()
+        selectedConfirmation.reset()
+        confirmedSelectedAnalysis = nil
+        selectedTask?.cancel()
+        gridTask?.cancel()
+        latestStableFrame = nil
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.freshness.matches(generation) else { return }
+            self.overlayController.showMoving()
+        }
+    }
+
+    func isCurrentGeneration(_ generation: UInt64) -> Bool {
+        freshness.matches(generation)
+    }
+
+    private func startSelectedAnalysis(_ frame: CGImage, startedAt: CFAbsoluteTime) {
+        let generation = freshness.current
+        let requestID = UUID()
+        selectedRequestID = requestID
+        lastSelectedStarted = startedAt
+        selectedTask = Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let analysis = try await ScreenshotSpriteAnalyzer.selectedReader.analyzeSelectedFrame(image: frame)
+                try Task.checkCancellation()
+                self?.sampleQueue.async { [weak self] in
+                    guard let self, self.selectedRequestID == requestID else { return }
+                    self.selectedTask = nil
+                    self.selectedRequestID = nil
+                    guard self.freshness.matches(generation),
+                          CFAbsoluteTimeGetCurrent() - startedAt < 1.0 else { return }
+                    self.acceptSelected(analysis, generation: generation, startedAt: startedAt)
+                }
+            } catch {
+                self?.sampleQueue.async { [weak self] in
+                    guard let self, self.selectedRequestID == requestID else { return }
+                    self.selectedTask = nil
+                    self.selectedRequestID = nil
+                    // A cancelled/failed read cannot count as a second agreement.
+                    self.selectedConfirmation.reset()
+                }
+            }
+        }
+    }
+
+    private func acceptSelected(_ raw: SpriteFrameAnalysis, generation: UInt64, startedAt: CFAbsoluteTime) {
+        guard raw.isCollectionScreen else {
+            selectedConfirmation.reset()
+            confirmedSelectedAnalysis = nil
+            let current = freshness.advance()
+            publish(raw, generation: current, selectedOnly: true, confirmed: false)
             return
         }
-
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
-
-        if previewEnabled, now - lastPreviewAt >= 2.0 {
-            lastPreviewAt = now
-            onPreview?(cgImage)
+        guard let detection = raw.detections.first,
+              raw.selectedSpriteName == detection.name,
+              detection.status == .lost || detection.level != nil else {
+            selectedConfirmation.reset()
+            return
         }
+        let result = selectedConfirmation.observe(detection)
+        if result.changed {
+            // Polling catches selection changes even when the cheap pixel
+            // signature did not. Invalidate older grid/UI work before publishing.
+            _ = freshness.advance()
+            confirmedSelectedAnalysis = nil
+        }
+        let currentGeneration = freshness.current
+        if result.confirmed {
+            confirmedSelectedAnalysis = raw
+            panelConfirmedNames.insert(detection.name)
+        }
+        publish(raw, generation: currentGeneration, selectedOnly: true, confirmed: result.confirmed,
+                save: result.shouldEmit)
+        if Fixes.logCaptureAlignment, result.shouldEmit {
+            print(String(format: "[selected] %@ %.0f ms (OCR + selection alignment; two reads confirmed)",
+                         detection.name, (CFAbsoluteTimeGetCurrent() - startedAt) * 1000))
+        }
+    }
 
-        isAnalyzingFrame = true
-        lastAnalysisStarted = now
-        lastAnalyzedFingerprint = fingerprint
-        latestStableFrame = cgImage
-        onStatus?("Stable view found — validating the Sprites tab…")
-
-        Task { [weak self] in
-            guard let self else { return }
-            defer {
-                self.sampleQueue.async { [weak self] in
-                    self?.isAnalyzingFrame = false
-                }
-            }
-
-            // The overlay maps analyzer coordinates, which are normalized to
-            // this buffer, onto the panel rect. If the two disagree in aspect
-            // the drawing is offset even when the geometry is correct, so make
-            // the discrepancy visible rather than silent.
-            if let overlayRect = self.selectedOverlayRect, Fixes.logCaptureAlignment {
-                let imageAspect = Double(cgImage.width) / Double(max(cgImage.height, 1))
-                let panelAspect = Double(overlayRect.width) / Double(max(overlayRect.height, 1))
-                if abs(imageAspect - panelAspect) > 0.01 {
-                    print("[capture] MISMATCH image \(cgImage.width)x\(cgImage.height) "
-                          + "(aspect \(String(format: "%.4f", imageAspect))) vs panel "
-                          + "\(Int(overlayRect.width))x\(Int(overlayRect.height)) "
-                          + "(aspect \(String(format: "%.4f", panelAspect)))")
-                }
-            }
-
+    private func startGridAnalysis(_ frame: CGImage, startedAt: CFAbsoluteTime) {
+        let generation = freshness.current
+        let requestID = UUID()
+        gridRequestID = requestID
+        lastAnalysisStarted = startedAt
+        gridTask = Task.detached(priority: .utility) { [weak self] in
             do {
-                let analysis = try await ScreenshotSpriteAnalyzer.shared.analyzeFrame(
-                    image: cgImage,
-                    onProgress: { _, _ in },
-                    onCollectionValidated: { [weak self] in
-                        guard let self else { return }
-                        DispatchQueue.main.async { [overlayController = self.overlayController] in
-                            // Processing boxes are shown only after the current
-                            // frame has passed the strict tab-selection gate.
-                            overlayController.beginProcessing()
-                        }
-                    },
-                    onCardsAligned: { [weak self] anchors in
-                        guard let self else { return }
-                        DispatchQueue.main.async { [overlayController = self.overlayController] in
-                            overlayController.showProcessing(anchors: anchors)
-                        }
-                    }
-                )
-                DispatchQueue.main.async { [overlayController] in
-                    overlayController.update(with: analysis)
+                let raw = try await ScreenshotSpriteAnalyzer.shared.analyzeFrame(image: frame, onProgress: { _, _ in })
+                try Task.checkCancellation()
+                self?.sampleQueue.async { [weak self] in
+                    guard let self, self.gridRequestID == requestID else { return }
+                    self.gridTask = nil
+                    self.gridRequestID = nil
+                    guard self.freshness.matches(generation),
+                          CFAbsoluteTimeGetCurrent() - startedAt < 2.5 else { return }
+                    // Only the fast lane can immediately confirm panel readings.
+                    // Full-grid artwork still goes through agreement before save.
+                    let detections = raw.detections.filter { $0.name != raw.selectedSpriteName }
+                    let analysis = SpriteFrameAnalysis(
+                        detections: detections, isCollectionScreen: raw.isCollectionScreen,
+                        visibleSlots: raw.visibleSlots, inferredPageStart: raw.inferredPageStart,
+                        coveredCatalogIndexes: [], lockedSlots: raw.lockedSlots,
+                        needsHelpSlots: raw.needsHelpSlots, selectedSpriteName: nil,
+                        cardAnchors: raw.cardAnchors, gridFrame: raw.gridFrame
+                    )
+                    self.publish(analysis, generation: generation, selectedOnly: false, confirmed: false)
                 }
-                self.onAnalysis?(analysis)
-            } catch is CancellationError {
-                return
             } catch {
-                self.onError?(error)
+                self?.sampleQueue.async { [weak self] in
+                    guard let self, self.gridRequestID == requestID else { return }
+                    self.gridTask = nil
+                    self.gridRequestID = nil
+                }
+            }
+        }
+    }
+
+    private func publish(
+        _ raw: SpriteFrameAnalysis, generation: UInt64,
+        selectedOnly: Bool, confirmed: Bool, save: Bool = true
+    ) {
+        var analysis = raw
+        analysis.captureGeneration = generation
+        analysis.isPartialUpdate = selectedOnly
+        // Capture the selected confirmation for this exact scene. A slower grid
+        // result must not replace it with an artwork guess or erase its label.
+        let selected = confirmedSelectedAnalysis
+        let persisted = selectedOnly ? analysis : SpriteFrameAnalysis(
+            detections: analysis.detections.filter { !panelConfirmedNames.contains($0.name) },
+            isCollectionScreen: analysis.isCollectionScreen, visibleSlots: analysis.visibleSlots,
+            inferredPageStart: nil, coveredCatalogIndexes: [], lockedSlots: analysis.lockedSlots,
+            needsHelpSlots: analysis.needsHelpSlots, selectedSpriteName: nil,
+            cardAnchors: analysis.cardAnchors, gridFrame: analysis.gridFrame,
+            captureGeneration: generation
+        )
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.freshness.matches(generation) else { return }
+            if selectedOnly {
+                self.overlayController.updateSelected(with: analysis, confirmed: confirmed)
+            } else {
+                self.overlayController.update(with: analysis)
+                if let selected {
+                    self.overlayController.updateSelected(with: selected, confirmed: true)
+                }
+            }
+            if save && (!selectedOnly || confirmed || !analysis.isCollectionScreen) {
+                self.onAnalysis?(persisted)
             }
         }
     }
 
     private func requestDeepScan(slot: Int) {
         sampleQueue.async { [weak self] in
-            guard let self else { return }
-            guard !self.isAnalyzingFrame, let frame = self.latestStableFrame else {
-                DispatchQueue.main.async { [overlayController = self.overlayController] in
-                    overlayController.finishDeepScan(slot: slot, detection: nil)
-                }
-                return
-            }
-
+            guard let self, self.gridTask == nil, !self.isAnalyzingFrame,
+                  let frame = self.latestStableFrame else { return }
+            let generation = self.freshness.current
+            let requestID = UUID()
+            self.gridRequestID = requestID
             self.isAnalyzingFrame = true
-            Task { [weak self] in
-                guard let self else { return }
-                defer {
-                    self.sampleQueue.async { [weak self] in self?.isAnalyzingFrame = false }
-                }
-
-                do {
-                    let detection = try await ScreenshotSpriteAnalyzer.shared.deepAnalyzeCard(
-                        image: frame,
-                        slot: slot
-                    )
-                    DispatchQueue.main.async { [overlayController = self.overlayController] in
-                        overlayController.finishDeepScan(slot: slot, detection: detection)
+            self.gridTask = Task.detached(priority: .utility) { [weak self] in
+                let detection = try? await ScreenshotSpriteAnalyzer.shared.deepAnalyzeCard(image: frame, slot: slot)
+                self?.sampleQueue.async { [weak self] in
+                    guard let self, self.gridRequestID == requestID else { return }
+                    self.gridTask = nil
+                    self.gridRequestID = nil
+                    self.isAnalyzingFrame = false
+                    guard self.freshness.matches(generation) else { return }
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.freshness.matches(generation) else { return }
+                        self.overlayController.finishDeepScan(slot: slot, detection: detection)
                     }
-
+                    // Artwork-only deep scans are not right-panel proof.
                     if let detection {
-                        self.onAnalysis?(SpriteFrameAnalysis(
-                            detections: [detection],
-                            isCollectionScreen: true,
-                            visibleSlots: 0,
-                            inferredPageStart: nil,
-                            coveredCatalogIndexes: [],
-                            lockedSlots: [],
-                            needsHelpSlots: [],
-                            selectedSpriteName: detection.name,
-                            cardAnchors: []
-                        ))
-                    }
-                } catch is CancellationError {
-                    return
-                } catch {
-                    DispatchQueue.main.async { [overlayController = self.overlayController] in
-                        overlayController.finishDeepScan(slot: slot, detection: nil)
+                        var analysis = SpriteFrameAnalysis(
+                            detections: [detection], isCollectionScreen: true, visibleSlots: 0,
+                            inferredPageStart: nil, coveredCatalogIndexes: [], lockedSlots: [],
+                            needsHelpSlots: [], selectedSpriteName: nil, cardAnchors: []
+                        )
+                        analysis.captureGeneration = generation
+                        analysis.isPartialUpdate = true
+                        self.onAnalysis?(analysis)
                     }
                 }
             }
@@ -527,6 +620,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
             guard age > 4.0, !self.watchdogReportedIdle else { return }
 
             self.watchdogReportedIdle = true
+            self.invalidateScene()
             self.previousFingerprint = nil
             self.lastAnalyzedFingerprint = nil
             self.motionStateActive = false
@@ -540,6 +634,16 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
     }
 
     private func resetAdaptiveState() {
+        selectedTask?.cancel()
+        gridTask?.cancel()
+        selectedTask = nil
+        gridTask = nil
+        selectedRequestID = nil
+        gridRequestID = nil
+        selectedConfirmation.reset()
+        confirmedSelectedAnalysis = nil
+        lastSelectedStarted = 0
+        previousDetailFingerprint = nil
         isAnalyzingFrame = false
         latestStableFrame = nil
         lastAnalysisStarted = 0
@@ -733,7 +837,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
     /// Samples only the collection grid and right detail panel. The animated 3D
     /// Sprite in the center of Fortnite is intentionally ignored so its idle
     /// animation doesn't make a stationary collection look like fast scrolling.
-    private func motionFingerprint(_ pixelBuffer: CVPixelBuffer) -> [UInt8]? {
+    private func motionFingerprint(_ pixelBuffer: CVPixelBuffer, detail: Bool = false) -> [UInt8]? {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
@@ -785,9 +889,11 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
         // never settles — the scan sat on "tracking scroll" forever and never
         // produced anchors. Scroll position is what we actually need to detect,
         // and the grid alone shows that.
-        let region = (x: 0.045, y: 0.20, width: 0.32, height: 0.72)
-        let samplesX = 16
-        let samplesY = 14
+        let region = detail
+            ? (x: 0.67, y: 0.38, width: 0.29, height: 0.25)
+            : (x: 0.045, y: 0.20, width: 0.32, height: 0.72)
+        let samplesX = detail ? 48 : 24
+        let samplesY = detail ? 24 : 24
         var output: [UInt8] = []
         output.reserveCapacity(samplesX * samplesY)
 
@@ -854,6 +960,63 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate, @u
             score -= 80
         }
         return score
+    }
+}
+
+// MARK: - Live scan freshness and confirmation
+
+/// Shared by the capture queue and the UI queue. Stopping, restarting, or a
+/// changed scene makes every earlier token unusable, including queued callbacks.
+final class CaptureFreshness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var active = false
+
+    var current: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return generation
+    }
+    @discardableResult func start() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        generation &+= 1
+        active = true
+        return generation
+    }
+    @discardableResult func advance() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        generation &+= 1
+        return generation
+    }
+    func stop() {
+        lock.lock(); defer { lock.unlock() }
+        generation &+= 1
+        active = false
+    }
+    func matches(_ token: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return active && generation == token
+    }
+}
+
+/// Two independently captured complete readings are needed before the selected
+/// detail becomes a green check or a profile write. Repeated unchanged polls do
+/// not keep writing the same profile.
+struct SelectedReadingConfirmation {
+    private var signature: String?
+    private var count = 0
+    private var emitted = false
+
+    mutating func reset() { signature = nil; count = 0; emitted = false }
+
+    mutating func observe(_ detection: DetectedSprite) -> (changed: Bool, confirmed: Bool, shouldEmit: Bool) {
+        let key = "\(detection.name)|\(detection.status.rawValue)|\(detection.level.map(String.init) ?? "?")|\(detection.mastered)"
+        let changed = signature != key
+        if changed { signature = key; count = 0; emitted = false }
+        count += 1
+        let confirmed = count >= 2
+        let shouldEmit = confirmed && !emitted
+        if shouldEmit { emitted = true }
+        return (changed, confirmed, shouldEmit)
     }
 }
 
@@ -1013,22 +1176,17 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
 
     func showMoving() {
         precondition(Thread.isMainThread)
-        // Keep the last known marks on screen while Fortnite scrolls. Clearing
-        // them here made every mark blink out and back on each scroll, which
-        // reads as broken even when recognition is fine. They are stale for a
-        // moment; that is far less distracting than flicker, and the next stable
-        // frame replaces them.
-        //
-        // The *cache* behind them is dropped, though. Once the list has moved,
-        // nothing at a given position is the same card any more, so keeping it
-        // would re-apply the previous page's names to the new one.
-        rememberedStates.removeAll()
+        // Keep no labels at old screen coordinates while the cards move.
+        // Artwork/position checks in update decide whether memory is reusable.
         deepScannedSlots.removeAll()
         requiresRealignment = true
         hoveredSlot = nil
         overlayView?.hoveredSlot = nil
-        overlayView?.mode = .collection
-        overlayView?.statusText = "Tracking scroll…"
+        overlayView?.selectedSlot = nil
+        overlayView?.cardAnchors = []
+        overlayView?.cardStates = [:]
+        overlayView?.mode = .moving
+        overlayView?.statusText = "Reading current selection…"
         overlayView?.needsDisplay = true
     }
 
@@ -1168,9 +1326,61 @@ private final class SpriteScanOverlayController: @unchecked Sendable {
 
         view.mode = .collection
         view.statusText = analysis.detections.isEmpty
-            ? "Cards aligned · hover 👎 to retry"
+            ? "Select a Sprite in Fortnite to confirm it"
             : "Cards aligned · \(analysis.detections.count) recognized"
         view.cardStates = states
+        view.needsDisplay = true
+    }
+
+    /// Fast detail updates describe one card. They must not replace the whole
+    /// grid, prune other remembered cards, or turn an unconfirmed read green.
+    func updateSelected(with analysis: SpriteFrameAnalysis, confirmed: Bool) {
+        precondition(Thread.isMainThread)
+        guard analysis.isCollectionScreen else {
+            showWaiting(message: "Please open Sprites → Collection · Stop ⌃⌥X")
+            return
+        }
+        guard let view = overlayView, let detection = analysis.detections.first else { return }
+        view.mode = .collection
+        let details = "\(detection.name)\(detection.level.map { " · L\($0)" } ?? "")\(detection.mastered ? " · Mastered" : "")"
+        view.statusText = confirmed ? details : "Checking \(detection.name)…"
+
+        if let selected = analysis.cardAnchors.first {
+            // Slot indices may differ between the small/whole-grid analyses.
+            // Associate by the actual rectangle, not its temporary array index.
+            let match = view.cardAnchors.first {
+                abs(($0.x + $0.width / 2) - (selected.x + selected.width / 2)) < selected.width * 0.25
+                    && abs(($0.y + $0.height / 2) - (selected.y + selected.height / 2)) < selected.height * 0.25
+            }
+            let slot = match?.slot ?? -1
+            let anchor = SpriteCardAnchor(
+                slot: slot, x: selected.x, y: selected.y,
+                width: selected.width, height: selected.height,
+                visualSignature: selected.visualSignature
+            )
+            if let index = view.cardAnchors.firstIndex(where: { $0.slot == slot }) {
+                view.cardAnchors[index] = anchor
+            } else {
+                view.cardAnchors.append(anchor)
+            }
+            if confirmed {
+                let state: SpriteOverlayCardState = detection.status == .lost
+                    ? .lost(name: detection.name, level: detection.level, mastered: detection.mastered)
+                    : .recognized(name: detection.name, level: detection.level, mastered: detection.mastered)
+                view.cardStates[slot] = state
+                remember(state, for: anchor)
+                sessionIdentifiedNames.insert(detection.name)
+                view.spritesRead = sessionIdentifiedNames.count
+            } else {
+                view.cardStates[slot] = .processing
+            }
+            view.selectedSlot = confirmed ? slot : nil
+        } else {
+            // A readable panel can be confirmed without inventing which card
+            // owns it. The status pill provides feedback until binding is safe.
+            view.selectedSlot = nil
+        }
+        if view.sessionStartedAt == nil { view.sessionStartedAt = Date() }
         view.needsDisplay = true
     }
 
