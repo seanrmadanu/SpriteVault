@@ -47,6 +47,10 @@ struct SpriteFrameAnalysis: Sendable {
     /// origin. Anchored to static chrome — the rule under the filter row and the
     /// Sprite Dust bar — so it holds still while the cards scroll behind it.
     var gridFrame: CGRect? = nil
+    /// Token for live-capture freshness checks. Partial selected-card updates
+    /// carry this without replacing the full grid state.
+    var captureGeneration: UInt64? = nil
+    var isPartialUpdate: Bool = false
 }
 
 actor VideoSpriteAnalyzer {
